@@ -1,6 +1,0 @@
-2026-02-04 14:47:33,346 INFO     Starting server at tcp:port=8000:interface=0.0.0.0
-2026-02-04 14:47:33,347 INFO     HTTP/2 support not enabled (install the http2 and tls Twisted extras)
-2026-02-04 14:47:33,347 INFO     Configuring endpoint tcp:port=8000:interface=0.0.0.0
-2026-02-04 14:47:33,349 INFO     Listening on TCP address 0.0.0.0:8000
-Unauthorized: /api/auth/me/
-2026-02-04 14:47:58,300 WARNING  Unauthorized: /api/auth/me/
