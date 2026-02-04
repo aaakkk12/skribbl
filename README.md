@@ -1,65 +1,94 @@
-# ProAuth (Django + Next.js)
+# Skribbl-Style Live Drawing Game (Django + Next.js)
 
-This project provides a JWT cookie-based auth backend in Django and a polished Next.js frontend with signup, login, and password reset flows.
+Real-time multiplayer drawing + guessing game with JWT cookie auth, WebSockets, lobby updates, and an admin control panel.
 
-## Backend
+## Features
+- JWT cookie auth (signup, login, reset password).
+- Live drawing rooms with chat, hints, rounds, scoring, and kick votes.
+- Room privacy: open or private (password protected).
+- Lobby with real-time room list and player counts.
+- Admin panel for room control and user management (ban/archive/restore).
 
-1. Create a virtual environment and install dependencies:
+## Project Structure
+- `backend/` Django + Channels + Redis.
+- `frontend/` Next.js App Router UI.
 
+## Backend Setup
+1. Create venv + install deps:
 ```bash
 cd backend
 python -m venv .venv
-.venv\\Scripts\\activate
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-2. Create `.env` from `.env.example` and fill in your SMTP credentials.
+2. Create `.env` from `.env.example` and fill credentials:
+```bash
+copy .env.example .env
+```
 
-3. Run migrations and start the server:
-
+3. Run migrations:
 ```bash
 python manage.py migrate
+```
+
+4. Start server:
+```bash
 python manage.py runserver 8000
 ```
 
-To run with WebSockets (recommended for live rooms), use Daphne:
-
+For WebSockets (recommended), use Daphne:
 ```bash
 cd backend
 daphne -b 0.0.0.0 -p 8000 backend.asgi:application
 ```
 
-## Frontend
-
-1. Install dependencies and start Next.js:
-
+## Frontend Setup
+1. Install deps and run:
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev -- -p 3000
 ```
 
-2. Create `.env.local` from `.env.local.example` if you need to change the API base URL.
+2. Optional: `.env.local` (if you need a different API URL).
 
-## Endpoints
+## Admin Panel
+- URL: `http://localhost:3000/admin`
+- Credentials come from `.env`:
+```
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=123
+```
+Capabilities:
+- List rooms and toggle open/private.
+- Delete rooms (broadcasts close event).
+- List users, send reset links, ban, archive, restore.
 
-- `POST /api/auth/register/`
-- `POST /api/auth/login/`
-- `POST /api/auth/logout/`
-- `POST /api/auth/token/refresh/`
-- `POST /api/auth/password-reset/`
-- `POST /api/auth/password-reset/confirm/`
-- `GET /api/auth/me/`
-- `POST /api/rooms/create/`
-- `POST /api/rooms/join/`
+## Room Privacy
+- Create room with `open` or `private`.
+- Private rooms require a password for join.
+- Lobby shows `Open` / `Private`.
 
-## Live Drawing Rooms
-
-- WebSocket endpoint: `ws://localhost:8000/ws/rooms/<CODE>/`
-- Rooms are capped at 8 players.
-- Uses Redis channel layers via `REDIS_URL` (configure in `.env`).
+## WebSocket Endpoints
+- Rooms: `ws://localhost:8000/ws/rooms/<CODE>/`
+- Lobby: `ws://localhost:8000/ws/lobby/`
 
 ## Notes
+- JWT cookies: `access_token` + `refresh_token` are HttpOnly.
+- Redis required for Channels: set `REDIS_URL` in `.env`.
+- If you see SQLite `disk I/O error`, pause OneDrive sync or move project outside OneDrive before running migrations.
 
-- JWTs are stored in HttpOnly cookies (`access_token`, `refresh_token`).
-- For production, set `JWT_COOKIE_SECURE=True`, update `ALLOWED_HOSTS`, and use HTTPS.
+## Production Tips
+- Set `JWT_COOKIE_SECURE=True` and use HTTPS.
+- Configure `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`.
+- Replace default admin creds in `.env`.
+
+## Release Checklist
+1. Verify `.env` is not committed; only `.env.example` is in git.
+2. Update `ALLOWED_HOSTS`, `CORS_ALLOWED_ORIGINS`, `FRONTEND_URL`.
+3. Set `JWT_COOKIE_SECURE=True` and HTTPS termination.
+4. Set strong `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+5. Ensure Redis is running and `REDIS_URL` is correct.
+6. Run `python manage.py migrate` on production DB.
+7. Build frontend: `npm run build` and run with `npm run start`.
