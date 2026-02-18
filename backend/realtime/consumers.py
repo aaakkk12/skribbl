@@ -4,6 +4,7 @@ import math
 import random
 import time
 from collections import deque
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Deque, Dict, Optional, Set, Tuple
 
@@ -12,9 +13,11 @@ from channels.db import database_sync_to_async
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from django.conf import settings
 from django.contrib.auth.models import AnonymousUser
+from django.contrib.auth import get_user_model
 
 from .models import Room, RoomMember
 from .lobby import rooms_snapshot
+from .lifecycle import cleanup_inactive_rooms, sync_room_empty_state
 
 MAX_PLAYERS = 8
 CHAT_HISTORY_LIMIT = 500
@@ -25,6 +28,11 @@ DISCONNECT_GRACE_SECONDS = 60
 ROUND_BREAK_SECONDS = 5
 KICK_VOTE_SECONDS = 20
 MAX_CHAT_COOLDOWN = 12
+ROOM_HISTORY_TTL_SECONDS = int(getattr(settings, "ROOM_HISTORY_TTL_SECONDS", 60 * 60 * 24 * 7))
+ROOM_STATE_TTL_SECONDS = int(getattr(settings, "ROOM_STATE_TTL_SECONDS", 60 * 60 * 24))
+REDIS_LOCK_TIMEOUT_SECONDS = 10
+REDIS_LOCK_WAIT_SECONDS = 5
+TIMER_OWNER_GRACE_SECONDS = 15
 
 WORDS = [
     "tree",
@@ -183,6 +191,22 @@ def draw_key(code: str) -> str:
     return f"room:{code}:draw"
 
 
+def game_state_key(code: str) -> str:
+    return f"room:{code}:game_state"
+
+
+def room_lock_key(code: str) -> str:
+    return f"room:{code}:lock"
+
+
+def timer_owner_key(code: str) -> str:
+    return f"room:{code}:timer_owner"
+
+
+def connection_count_key(code: str, user_id: int) -> str:
+    return f"room:{code}:connections:{user_id}"
+
+
 def mask_word(word: str, revealed: Set[int]) -> str:
     letters = []
     for idx, char in enumerate(word):
@@ -199,7 +223,240 @@ def serialize_scores(scores: Dict[int, int]) -> Dict[str, int]:
     return {str(key): value for key, value in scores.items()}
 
 
+def state_payload(state: GameState) -> Dict:
+    return {
+        "status": state.status,
+        "round_index": state.round_index,
+        "max_rounds": state.max_rounds,
+        "round_seconds": state.round_seconds,
+        "drawer_id": state.drawer_id,
+        "word": state.word,
+        "scores": serialize_scores(state.scores),
+        "guessed": [int(user_id) for user_id in sorted(state.guessed)],
+        "revealed_indices": [int(idx) for idx in sorted(state.revealed_indices)],
+        "started_at": state.started_at,
+        "last_drawer_id": state.last_drawer_id,
+        "kick_votes": {
+            str(target_id): [int(voter_id) for voter_id in sorted(voters)]
+            for target_id, voters in state.kick_votes.items()
+        },
+        "kick_responses": {
+            str(target_id): [int(voter_id) for voter_id in sorted(voters)]
+            for target_id, voters in state.kick_responses.items()
+        },
+    }
+
+
+def apply_state_payload(state: GameState, payload: Dict) -> GameState:
+    state.status = payload.get("status", "waiting")
+    state.round_index = int(payload.get("round_index", 0))
+    state.max_rounds = int(payload.get("max_rounds", 10))
+    state.round_seconds = int(payload.get("round_seconds", 120))
+    state.drawer_id = payload.get("drawer_id")
+    state.word = payload.get("word")
+    raw_scores = payload.get("scores") or {}
+    state.scores = {int(key): int(value) for key, value in raw_scores.items()}
+    state.guessed = {int(value) for value in (payload.get("guessed") or [])}
+    state.revealed_indices = {int(value) for value in (payload.get("revealed_indices") or [])}
+    state.started_at = float(payload.get("started_at", 0.0))
+    state.last_drawer_id = payload.get("last_drawer_id")
+    raw_kick_votes = payload.get("kick_votes") or {}
+    state.kick_votes = {
+        int(target_id): {int(voter_id) for voter_id in voters}
+        for target_id, voters in raw_kick_votes.items()
+    }
+    raw_kick_responses = payload.get("kick_responses") or {}
+    state.kick_responses = {
+        int(target_id): {int(voter_id) for voter_id in voters}
+        for target_id, voters in raw_kick_responses.items()
+    }
+    return state
+
+
 class RoomConsumer(AsyncJsonWebsocketConsumer):
+    @asynccontextmanager
+    async def state_lock(self):
+        local_lock = get_lock(self.code)
+        redis_lock = None
+        async with local_lock:
+            client = await get_redis_client()
+            if client:
+                redis_lock = client.lock(
+                    room_lock_key(self.code),
+                    timeout=REDIS_LOCK_TIMEOUT_SECONDS,
+                    blocking_timeout=REDIS_LOCK_WAIT_SECONDS,
+                )
+                acquired = await redis_lock.acquire(blocking=True)
+                if not acquired:
+                    raise RuntimeError("Could not acquire distributed room lock")
+            try:
+                yield
+            finally:
+                if redis_lock:
+                    try:
+                        await redis_lock.release()
+                    except Exception:
+                        pass
+
+    async def load_state_from_redis(self, state: GameState):
+        client = await get_redis_client()
+        if not client:
+            return state
+        try:
+            raw = await client.get(game_state_key(self.code))
+            if not raw:
+                return state
+            payload = json.loads(raw)
+            return apply_state_payload(state, payload)
+        except Exception:
+            return state
+
+    async def save_state_to_redis(self, state: GameState):
+        client = await get_redis_client()
+        if not client:
+            return
+        try:
+            await client.set(
+                game_state_key(self.code),
+                json.dumps(state_payload(state)),
+                ex=ROOM_STATE_TTL_SECONDS,
+            )
+        except Exception:
+            return
+
+    async def increment_connection_count(self, user_id: int):
+        client = await get_redis_client()
+        if not client:
+            return
+        try:
+            key = connection_count_key(self.code, user_id)
+            await client.incr(key)
+            await client.expire(key, DISCONNECT_GRACE_SECONDS * 4)
+        except Exception:
+            return
+
+    async def decrement_connection_count(self, user_id: int):
+        client = await get_redis_client()
+        if not client:
+            return
+        try:
+            key = connection_count_key(self.code, user_id)
+            count = await client.decr(key)
+            if count <= 0:
+                await client.delete(key)
+        except Exception:
+            return
+
+    async def reset_connection_count(self, user_id: int):
+        client = await get_redis_client()
+        if not client:
+            return
+        try:
+            await client.delete(connection_count_key(self.code, user_id))
+        except Exception:
+            return
+
+    async def get_connection_count(self, user_id: int) -> int:
+        client = await get_redis_client()
+        if not client:
+            state = get_state(self.code)
+            return len(state.connections.get(user_id, set()))
+        try:
+            raw = await client.get(connection_count_key(self.code, user_id))
+            return int(raw or 0)
+        except Exception:
+            return 0
+
+    async def claim_timer_owner(self, round_index: int, started_at: float) -> bool:
+        client = await get_redis_client()
+        if not client:
+            return True
+        payload = json.dumps(
+            {
+                "channel": self.channel_name,
+                "round_index": round_index,
+                "started_at": started_at,
+            }
+        )
+        try:
+            claimed = bool(
+                await client.set(
+                    timer_owner_key(self.code),
+                    payload,
+                    nx=True,
+                    ex=max(10, TIMER_OWNER_GRACE_SECONDS + 2),
+                )
+            )
+            if claimed:
+                return True
+            current = await client.get(timer_owner_key(self.code))
+            if not current:
+                return False
+            try:
+                current_payload = json.loads(current)
+            except Exception:
+                current_payload = {}
+            current_round = int(current_payload.get("round_index", -1))
+            current_started_at = float(current_payload.get("started_at", 0.0))
+            if current_round != int(round_index) or abs(current_started_at - float(started_at)) > 0.01:
+                await client.set(
+                    timer_owner_key(self.code),
+                    payload,
+                    ex=max(10, TIMER_OWNER_GRACE_SECONDS + 2),
+                )
+                return True
+            return current_payload.get("channel") == self.channel_name
+        except Exception:
+            return True
+
+    async def renew_timer_owner(self, seconds: int):
+        client = await get_redis_client()
+        if not client:
+            return
+        try:
+            if not await self.is_timer_owner():
+                return
+            ttl = max(10, seconds + TIMER_OWNER_GRACE_SECONDS)
+            await client.expire(timer_owner_key(self.code), ttl)
+        except Exception:
+            return
+
+    async def release_timer_owner(self):
+        client = await get_redis_client()
+        if not client:
+            return
+        try:
+            owner = await client.get(timer_owner_key(self.code))
+            if owner:
+                try:
+                    owner_payload = json.loads(owner)
+                    owner_channel = owner_payload.get("channel")
+                except Exception:
+                    owner_channel = owner
+            else:
+                owner_channel = None
+            if owner_channel == self.channel_name:
+                await client.delete(timer_owner_key(self.code))
+        except Exception:
+            return
+
+    async def is_timer_owner(self) -> bool:
+        client = await get_redis_client()
+        if not client:
+            return True
+        try:
+            owner = await client.get(timer_owner_key(self.code))
+            if not owner:
+                return False
+            try:
+                owner_payload = json.loads(owner)
+                owner_channel = owner_payload.get("channel")
+            except Exception:
+                owner_channel = owner
+            return owner_channel == self.channel_name
+        except Exception:
+            return True
+
     async def connect(self):
         self.code = self.scope["url_route"]["kwargs"]["code"].upper()
         self.room_group_name = f"room_{self.code}"
@@ -209,6 +466,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4401)
             return
 
+        await self.cleanup_inactive_rooms_db()
         room = await self.get_room(self.code)
         if not room:
             await self.close(code=4404)
@@ -218,27 +476,25 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.close(code=4403)
             return
 
-        allowed = await self.ensure_member_active(room, user)
-        if not allowed:
+        # Membership must be established by REST join flow to enforce room rules.
+        if not await self.is_member_active(room, user.id):
             await self.close(code=4403)
             return
 
         self.room = room
         self.user = user
-        self.user_info = {
-            "id": user.id,
-            "name": (user.get_full_name() or user.email or user.username),
-            "email": user.email,
-        }
+        self.user_info = await self.get_public_user(user.id)
 
         state = get_state(self.code)
-        lock = get_lock(self.code)
-        async with lock:
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
             state.connections.setdefault(user.id, set()).add(self.channel_name)
             state.scores.setdefault(user.id, 0)
             task = state.disconnect_tasks.pop(user.id, None)
             if task:
                 task.cancel()
+            await self.save_state_to_redis(state)
+            await self.increment_connection_count(user.id)
 
         await self.channel_layer.group_add(self.room_group_name, self.channel_name)
         await self.accept()
@@ -254,8 +510,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.channel_layer.group_discard(getattr(self, "room_group_name", ""), self.channel_name)
             return
         state = get_state(self.code)
-        lock = get_lock(self.code)
-        async with lock:
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
             channels = state.connections.get(self.user.id, set())
             channels.discard(self.channel_name)
             if not channels:
@@ -266,23 +522,33 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                         state.disconnect_tasks[self.user.id] = asyncio.create_task(
                             self.mark_inactive_later(self.user.id)
                         )
+            await self.save_state_to_redis(state)
+            await self.decrement_connection_count(self.user.id)
         await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
 
     async def mark_inactive_later(self, user_id: int):
         await asyncio.sleep(DISCONNECT_GRACE_SECONDS)
         state = get_state(self.code)
-        lock = get_lock(self.code)
-        async with lock:
-            if user_id in state.connections:
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            if await self.get_connection_count(user_id) > 0:
                 return
+            state.connections.pop(user_id, None)
+            await self.save_state_to_redis(state)
         await self.set_member_inactive(self.room, user_id)
+        await self.sync_room_empty_state_db()
+        await self.cleanup_inactive_rooms_db()
         await self.cleanup_kick_votes(state, user_id)
         await self.broadcast_presence()
         await self.maybe_pause_game(state)
 
     async def receive_json(self, content, **kwargs):
+        if not await self.is_member_active(self.room, self.user.id):
+            await self.close(code=4003)
+            return
         message_type = content.get("type")
         state = get_state(self.code)
+        await self.load_state_from_redis(state)
 
         if message_type == "draw":
             if state.status != "running" or state.drawer_id != self.user.id:
@@ -354,20 +620,38 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             return
 
         normalized = message.lower()
-        if (
+        is_candidate = (
             state.status == "running"
             and state.word
             and self.user.id != state.drawer_id
             and self.user.id not in state.guessed
             and normalized == state.word.lower()
-        ):
-            points = max(20, 100 - 10 * len(state.guessed))
-            state.guessed.add(self.user.id)
-            state.scores[self.user.id] = state.scores.get(self.user.id, 0) + points
-            if state.drawer_id:
-                state.scores[state.drawer_id] = state.scores.get(state.drawer_id, 0) + 10
+        )
 
-            system_message = f"✅ {self.user_info['name']} guessed correctly! (+{points}) 🎉"
+        if is_candidate:
+            end_due_to_all_guessed = False
+            async with self.state_lock():
+                await self.load_state_from_redis(state)
+                is_still_candidate = (
+                    state.status == "running"
+                    and state.word
+                    and self.user.id != state.drawer_id
+                    and self.user.id not in state.guessed
+                    and normalized == state.word.lower()
+                )
+                if not is_still_candidate:
+                    return
+
+                points = max(20, 100 - 10 * len(state.guessed))
+                state.guessed.add(self.user.id)
+                state.scores[self.user.id] = state.scores.get(self.user.id, 0) + points
+                if state.drawer_id:
+                    state.scores[state.drawer_id] = state.scores.get(state.drawer_id, 0) + 10
+                await self.save_state_to_redis(state)
+                active_ids = await self.get_active_member_ids(self.code)
+                end_due_to_all_guessed = len(state.guessed) >= max(0, len(active_ids) - 1)
+
+            system_message = f"[Correct] {self.user_info['name']} guessed correctly (+{points})"
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
@@ -385,7 +669,6 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     "system": True,
                 },
             )
-
             await self.store_chat_message(
                 {
                     "id": f"{time.time()}-{random.random()}",
@@ -393,50 +676,45 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
                     "system": True,
                 }
             )
-
-            active_ids = self.get_connected_user_ids(state)
-            if not active_ids:
-                active_ids = await self.get_active_member_ids(self.code)
-            if len(state.guessed) >= max(0, len(active_ids) - 1):
+            if end_due_to_all_guessed:
                 await self.end_round(state, reason="all_guessed")
-        else:
-            payload = {
-                "type": "chat",
+            return
+
+        payload = {
+            "type": "chat",
+            "message": message,
+            "user": self.user_info,
+            "system": False,
+            "client_id": client_id,
+        }
+        await self.channel_layer.group_send(self.room_group_name, payload)
+        await self.store_chat_message(
+            {
+                "id": f"{time.time()}-{random.random()}",
                 "message": message,
                 "user": self.user_info,
                 "system": False,
                 "client_id": client_id,
             }
-            await self.channel_layer.group_send(self.room_group_name, payload)
-            await self.store_chat_message(
-                {
-                    "id": f"{time.time()}-{random.random()}",
-                    "message": message,
-                    "user": self.user_info,
-                    "system": False,
-                    "client_id": client_id,
-                }
-            )
+        )
 
     async def handle_kick_request(self, state: GameState, target_id: int):
         if target_id == self.user.id:
             return
-        if state.kick_votes:
-            await self.send_json({"type": "error", "message": "Kick vote already in progress."})
-            return
-
-        active_ids = self.get_connected_user_ids(state)
-        if not active_ids:
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            if state.kick_votes:
+                await self.send_json({"type": "error", "message": "Kick vote already in progress."})
+                return
             active_ids = await self.get_active_member_ids(self.code)
-        if target_id not in active_ids:
-            return
-
-        voters = state.kick_votes.setdefault(target_id, set())
-        voters.add(self.user.id)
-        responses = state.kick_responses.setdefault(target_id, set())
-        responses.add(self.user.id)
-
-        required = self.required_votes(active_ids, target_id)
+            if target_id not in active_ids:
+                return
+            voters = state.kick_votes.setdefault(target_id, set())
+            voters.add(self.user.id)
+            responses = state.kick_responses.setdefault(target_id, set())
+            responses.add(self.user.id)
+            required = self.required_votes(active_ids, target_id)
+            await self.save_state_to_redis(state)
 
         await self.channel_layer.group_send(
             self.room_group_name,
@@ -467,31 +745,31 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             )
 
     async def handle_kick_vote(self, state: GameState, target_id: int, approve: bool):
-        if target_id not in state.kick_votes:
-            return
         if target_id == self.user.id:
             return
-
-        active_ids = self.get_connected_user_ids(state)
-        if not active_ids:
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            if target_id not in state.kick_votes:
+                return
             active_ids = await self.get_active_member_ids(self.code)
-        eligible = [user_id for user_id in active_ids if user_id != target_id]
-        if self.user.id not in eligible:
-            return
+            eligible = [user_id for user_id in active_ids if user_id != target_id]
+            if self.user.id not in eligible:
+                return
 
-        voters = state.kick_votes.setdefault(target_id, set())
-        responses = state.kick_responses.setdefault(target_id, set())
-        if self.user.id in responses:
-            return
-        responses.add(self.user.id)
+            voters = state.kick_votes.setdefault(target_id, set())
+            responses = state.kick_responses.setdefault(target_id, set())
+            if self.user.id in responses:
+                return
+            responses.add(self.user.id)
 
-        if approve:
-            voters.add(self.user.id)
+            if approve:
+                voters.add(self.user.id)
 
-        voters.intersection_update(eligible)
-        responses.intersection_update(eligible)
+            voters.intersection_update(eligible)
+            responses.intersection_update(eligible)
+            required = self.required_votes(active_ids, target_id)
+            await self.save_state_to_redis(state)
 
-        required = self.required_votes(active_ids, target_id)
         if len(voters) >= required:
             await self.kick_user(state, target_id, "Voted out")
             return
@@ -513,25 +791,39 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         task = state.disconnect_tasks.pop(user_id, None)
         if task:
             task.cancel()
-        for channel_name in list(state.connections.get(user_id, set())):
-            await self.channel_layer.send(channel_name, {"type": "kick_disconnect"})
-        state.connections.pop(user_id, None)
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            state.connections.pop(user_id, None)
+            await self.save_state_to_redis(state)
+            await self.reset_connection_count(user_id)
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                "type": "direct_disconnect_user",
+                "target_id": user_id,
+                "close_code": 4003,
+            },
+        )
         await self.set_member_inactive(self.room, user_id)
+        await self.sync_room_empty_state_db()
+        await self.cleanup_inactive_rooms_db()
         await self.broadcast_presence()
         await self.maybe_pause_game(state)
 
     async def maybe_pause_game(self, state: GameState):
-        active_ids = self.get_connected_user_ids(state)
-        if not active_ids:
-            active_ids = await self.get_active_member_ids(self.code)
+        active_ids = await self.get_active_member_ids(self.code)
         if len(active_ids) >= 2:
             return
         if state.status == "running":
-            state.status = "waiting"
-            if state.task and not state.task.done():
-                state.task.cancel()
-            state.word = None
-            state.drawer_id = None
+            async with self.state_lock():
+                await self.load_state_from_redis(state)
+                state.status = "waiting"
+                if state.task and not state.task.done():
+                    state.task.cancel()
+                state.word = None
+                state.drawer_id = None
+                await self.save_state_to_redis(state)
+                await self.release_timer_owner()
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
@@ -542,6 +834,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     async def kick_timeout(self, state: GameState, target_id: int):
         await asyncio.sleep(KICK_VOTE_SECONDS)
+        await self.load_state_from_redis(state)
         if target_id in state.kick_votes:
             await self.cancel_kick_vote(state, target_id, "Vote expired")
 
@@ -549,8 +842,11 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         task = state.kick_timeout_tasks.pop(target_id, None)
         if task:
             task.cancel()
-        state.kick_votes.pop(target_id, None)
-        state.kick_responses.pop(target_id, None)
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            state.kick_votes.pop(target_id, None)
+            state.kick_responses.pop(target_id, None)
+            await self.save_state_to_redis(state)
         await self.channel_layer.group_send(
             self.room_group_name,
             {
@@ -561,23 +857,30 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
 
     async def cleanup_kick_votes(self, state: GameState, user_id: int):
-        if user_id in state.kick_votes:
-            await self.cancel_kick_vote(state, user_id, "Player left")
+        cancel_target_id: Optional[int] = None
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            if user_id in state.kick_votes:
+                cancel_target_id = user_id
+            if not state.kick_votes:
+                return
+            if cancel_target_id is None:
+                target_id = next(iter(state.kick_votes.keys()))
+                active_ids = await self.get_active_member_ids(self.code)
+                eligible = [uid for uid in active_ids if uid != target_id]
+                voters = state.kick_votes.get(target_id, set())
+                responses = state.kick_responses.get(target_id, set())
+                voters.discard(user_id)
+                responses.discard(user_id)
+                voters.intersection_update(eligible)
+                responses.intersection_update(eligible)
+                required = self.required_votes(active_ids, target_id)
+            await self.save_state_to_redis(state)
+
+        if cancel_target_id is not None:
+            await self.cancel_kick_vote(state, cancel_target_id, "Player left")
             return
-        if not state.kick_votes:
-            return
-        target_id = next(iter(state.kick_votes.keys()))
-        active_ids = self.get_connected_user_ids(state)
-        if not active_ids:
-            active_ids = await self.get_active_member_ids(self.code)
-        eligible = [uid for uid in active_ids if uid != target_id]
-        voters = state.kick_votes.get(target_id, set())
-        responses = state.kick_responses.get(target_id, set())
-        voters.discard(user_id)
-        responses.discard(user_id)
-        voters.intersection_update(eligible)
-        responses.intersection_update(eligible)
-        required = self.required_votes(active_ids, target_id)
+
         if len(voters) >= required:
             await self.kick_user(state, target_id, "Voted out")
             return
@@ -610,13 +913,26 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             },
         )
         await self.send_to_user(target_id, {"type": "kicked", "reason": reason})
-        for channel_name in list(state.connections.get(target_id, set())):
-            await self.channel_layer.send(channel_name, {"type": "kick_disconnect"})
-        state.connections.pop(target_id, None)
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            state.connections.pop(target_id, None)
+            await self.save_state_to_redis(state)
+            await self.reset_connection_count(target_id)
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                "type": "direct_disconnect_user",
+                "target_id": target_id,
+                "close_code": 4003,
+            },
+        )
         await self.set_member_inactive(self.room, target_id)
+        await self.sync_room_empty_state_db()
+        await self.cleanup_inactive_rooms_db()
         await self.broadcast_presence()
 
     async def send_game_state(self, state: GameState):
+        await self.load_state_from_redis(state)
         if state.status == "running" and state.word:
             masked = mask_word(state.word, state.revealed_indices)
             seconds_left = max(0, int(state.round_seconds - (time.time() - state.started_at)))
@@ -652,99 +968,148 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.send_json({"type": "history", "chat": chat, "draw": draw})
 
     async def maybe_start_game(self, state: GameState):
+        await self.load_state_from_redis(state)
         if state.status != "waiting" or state.round_index > 0:
             return
-        active_ids = self.get_connected_user_ids(state)
-        if not active_ids:
-            active_ids = await self.get_active_member_ids(self.code)
+        active_ids = await self.get_active_member_ids(self.code)
         if len(active_ids) >= 2:
             await self.start_round(state)
 
     async def start_game(self, state: GameState):
+        await self.load_state_from_redis(state)
         if state.status == "running":
             return
         await self.start_round(state)
 
     async def start_round(self, state: GameState):
-        lock = get_lock(self.code)
-        async with lock:
+        needs_players = False
+        finish_now = False
+        timer_owner = False
+        round_payload = None
+
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
             if state.status == "running":
                 return
-            active_ids = self.get_connected_user_ids(state)
-            if not active_ids:
-                active_ids = await self.get_active_member_ids(self.code)
+
+            active_ids = await self.get_active_member_ids(self.code)
             if len(active_ids) < 2:
-                await self.send_json(
-                    {"type": "error", "message": "Need at least 2 players to start."}
-                )
-                return
+                needs_players = True
+            else:
+                next_round = state.round_index + 1
+                if next_round > state.max_rounds:
+                    finish_now = True
+                else:
+                    state.status = "running"
+                    state.round_index = next_round
+                    state.word = random.choice(WORDS)
+                    state.guessed = set()
+                    state.revealed_indices = set()
+                    state.started_at = time.time()
 
-            next_round = state.round_index + 1
-            if next_round > state.max_rounds:
-                await self.finish_game(state)
-                return
+                    drawer_id = self.choose_drawer(active_ids, state.last_drawer_id)
+                    state.drawer_id = drawer_id
+                    state.last_drawer_id = drawer_id
+                    masked = mask_word(state.word, state.revealed_indices)
+                    await self.clear_draw_history()
+                    await self.save_state_to_redis(state)
+                    timer_owner = await self.claim_timer_owner(
+                        round_index=state.round_index,
+                        started_at=state.started_at,
+                    )
 
-            state.status = "running"
-            state.round_index = next_round
-            state.word = random.choice(WORDS)
-            state.guessed = set()
-            state.revealed_indices = set()
-            state.started_at = time.time()
+                    round_payload = {
+                        "round": state.round_index,
+                        "max_rounds": state.max_rounds,
+                        "drawer_id": state.drawer_id,
+                        "masked_word": masked,
+                        "duration": state.round_seconds,
+                        "scores": serialize_scores(state.scores),
+                        "word": state.word,
+                    }
 
-            drawer_id = self.choose_drawer(active_ids, state.last_drawer_id)
-            state.drawer_id = drawer_id
-            state.last_drawer_id = drawer_id
-
-            masked = mask_word(state.word, state.revealed_indices)
-
-            await self.clear_draw_history()
-            await self.channel_layer.group_send(
-                self.room_group_name,
-                {
-                    "type": "clear",
-                    "user": {"id": state.drawer_id},
-                },
+        if needs_players:
+            await self.send_json(
+                {"type": "error", "message": "Need at least 2 players to start."}
             )
+            return
 
-            await self.channel_layer.group_send(
-                self.room_group_name,
-                {
-                    "type": "round_start",
-                    "round": state.round_index,
-                    "max_rounds": state.max_rounds,
-                    "drawer_id": state.drawer_id,
-                    "masked_word": masked,
-                    "duration": state.round_seconds,
-                    "scores": serialize_scores(state.scores),
-                },
-            )
+        if finish_now:
+            await self.finish_game(state)
+            return
 
-            await self.send_to_user(state.drawer_id, {"type": "round_secret", "word": state.word})
+        if not round_payload:
+            return
 
-            if state.task and not state.task.done():
-                state.task.cancel()
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                "type": "clear",
+                "user": {"id": round_payload["drawer_id"]},
+            },
+        )
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                "type": "round_start",
+                "round": round_payload["round"],
+                "max_rounds": round_payload["max_rounds"],
+                "drawer_id": round_payload["drawer_id"],
+                "masked_word": round_payload["masked_word"],
+                "duration": round_payload["duration"],
+                "scores": round_payload["scores"],
+            },
+        )
+
+        await self.send_to_user(
+            round_payload["drawer_id"],
+            {"type": "round_secret", "word": round_payload["word"]},
+        )
+
+        if state.task and not state.task.done():
+            state.task.cancel()
+        if timer_owner:
             state.task = asyncio.create_task(self.round_timer(state))
 
     async def round_timer(self, state: GameState):
+        if not await self.is_timer_owner():
+            return
+
         hint_marks = {90, 60, 30}
-        for remaining in range(state.round_seconds, -1, -1):
-            if state.status != "running":
+        while True:
+            await self.load_state_from_redis(state)
+            if state.status != "running" or not await self.is_timer_owner():
                 return
+
+            seconds_left = max(0, int(state.round_seconds - (time.time() - state.started_at)))
             await self.channel_layer.group_send(
                 self.room_group_name,
                 {
                     "type": "timer",
-                    "seconds_left": remaining,
+                    "seconds_left": seconds_left,
                 },
             )
-            if remaining in hint_marks and state.word:
-                self.reveal_hint(state)
-                masked = mask_word(state.word, state.revealed_indices)
-                await self.channel_layer.group_send(
-                    self.room_group_name,
-                    {"type": "hint", "masked_word": masked},
-                )
+
+            if seconds_left in hint_marks and state.word:
+                masked = None
+                async with self.state_lock():
+                    await self.load_state_from_redis(state)
+                    if state.status == "running" and state.word:
+                        self.reveal_hint(state)
+                        await self.save_state_to_redis(state)
+                        masked = mask_word(state.word, state.revealed_indices)
+                if masked is not None:
+                    await self.channel_layer.group_send(
+                        self.room_group_name,
+                        {"type": "hint", "masked_word": masked},
+                    )
+
+            if seconds_left <= 0:
+                break
+
+            await self.renew_timer_owner(seconds_left)
             await asyncio.sleep(1)
+
         await self.end_round(state, reason="time")
 
     def reveal_hint(self, state: GameState):
@@ -762,16 +1127,33 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         state.revealed_indices.update(picks)
 
     async def end_round(self, state: GameState, reason: str):
-        if state.status != "running":
-            return
-        state.status = "waiting"
-        word = state.word or ""
+        word = ""
+        scores_payload = {}
+        current_round = 0
+        max_rounds = 0
+
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            if state.status != "running":
+                return
+            state.status = "waiting"
+            word = state.word or ""
+            scores_payload = serialize_scores(state.scores)
+            current_round = state.round_index
+            max_rounds = state.max_rounds
+            state.word = None
+            state.drawer_id = None
+            state.guessed = set()
+            state.revealed_indices = set()
+            await self.save_state_to_redis(state)
+            await self.release_timer_owner()
+
         await self.channel_layer.group_send(
             self.room_group_name,
             {
                 "type": "round_end",
                 "word": word,
-                "scores": serialize_scores(state.scores),
+                "scores": scores_payload,
                 "next_round_in": ROUND_BREAK_SECONDS,
                 "reason": reason,
             },
@@ -779,26 +1161,33 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         await self.store_chat_message(
             {
                 "id": f"{time.time()}-{random.random()}",
-                "message": f"✨ Word was: {word}",
+                "message": f"Word was: {word}",
                 "system": True,
             }
         )
-        state.word = None
-        state.drawer_id = None
 
         await asyncio.sleep(ROUND_BREAK_SECONDS)
-        if state.round_index < state.max_rounds:
+
+        if current_round < max_rounds:
             await self.start_round(state)
         else:
             await self.finish_game(state)
 
     async def finish_game(self, state: GameState):
-        state.status = "finished"
+        async with self.state_lock():
+            await self.load_state_from_redis(state)
+            state.status = "finished"
+            state.word = None
+            state.drawer_id = None
+            scores_payload = serialize_scores(state.scores)
+            await self.save_state_to_redis(state)
+            await self.release_timer_owner()
+
         await self.channel_layer.group_send(
             self.room_group_name,
             {
                 "type": "game_over",
-                "scores": serialize_scores(state.scores),
+                "scores": scores_payload,
             },
         )
 
@@ -812,23 +1201,29 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             choices = active_ids
         return random.choice(choices)
 
-    def get_connected_user_ids(self, state: GameState):
-        return list(state.connections.keys())
-
     def required_votes(self, active_ids, target_id: int) -> int:
         eligible = [uid for uid in active_ids if uid != target_id]
         return max(1, math.ceil(len(eligible) * 0.8))
 
     async def send_to_user(self, user_id: int, payload):
-        state = get_state(self.code)
-        for channel_name in state.connections.get(user_id, set()):
-            await self.channel_layer.send(channel_name, {"type": "direct", "payload": payload})
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                "type": "direct_to_user",
+                "target_id": user_id,
+                "payload": payload,
+            },
+        )
 
-    async def direct(self, event):
+    async def direct_to_user(self, event):
+        if self.user.id != event.get("target_id"):
+            return
         await self.send_json(event.get("payload", {}))
 
-    async def kick_disconnect(self, event):
-        await self.close(code=4003)
+    async def direct_disconnect_user(self, event):
+        if self.user.id != event.get("target_id"):
+            return
+        await self.close(code=event.get("close_code", 4003))
 
     async def presence(self, event):
         await self.send_json({"type": "presence", "members": event["members"]})
@@ -919,8 +1314,10 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if not client:
             return
         try:
-            await client.rpush(chat_key(self.code), json.dumps(payload))
-            await client.ltrim(chat_key(self.code), -CHAT_HISTORY_LIMIT, -1)
+            key = chat_key(self.code)
+            await client.rpush(key, json.dumps(payload))
+            await client.ltrim(key, -CHAT_HISTORY_LIMIT, -1)
+            await client.expire(key, ROOM_HISTORY_TTL_SECONDS)
         except Exception:
             return
 
@@ -939,8 +1336,10 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         if not client:
             return
         try:
-            await client.rpush(draw_key(self.code), json.dumps(payload))
-            await client.ltrim(draw_key(self.code), -DRAW_HISTORY_LIMIT, -1)
+            key = draw_key(self.code)
+            await client.rpush(key, json.dumps(payload))
+            await client.ltrim(key, -DRAW_HISTORY_LIMIT, -1)
+            await client.expire(key, ROOM_HISTORY_TTL_SECONDS)
         except Exception:
             return
 
@@ -993,28 +1392,22 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         return Room.objects.filter(code=code, is_active=True).first()
 
     @database_sync_to_async
-    def is_user_allowed(self, user_id: int) -> bool:
-        from authapp.models import UserStatus
-
-        status_row, _ = UserStatus.objects.get_or_create(user_id=user_id)
-        return not (status_row.is_banned or status_row.is_deleted)
+    def sync_room_empty_state_db(self):
+        return sync_room_empty_state(self.room.id)
 
     @database_sync_to_async
-    def ensure_member_active(self, room, user):
-        member = RoomMember.objects.filter(room=room, user=user).first()
-        if member and member.is_active:
-            return True
+    def cleanup_inactive_rooms_db(self):
+        return cleanup_inactive_rooms()
 
-        active_count = RoomMember.objects.filter(room=room, is_active=True).count()
-        if active_count >= MAX_PLAYERS:
+    @database_sync_to_async
+    def is_user_allowed(self, user_id: int) -> bool:
+        from authapp.models import PlayerProfile, UserStatus
+
+        status_row, _ = UserStatus.objects.get_or_create(user_id=user_id)
+        if status_row.is_banned or status_row.is_deleted:
             return False
-
-        if member:
-            member.is_active = True
-            member.save(update_fields=["is_active"])
-        else:
-            RoomMember.objects.create(room=room, user=user, is_active=True)
-        return True
+        profile, _ = PlayerProfile.objects.get_or_create(user_id=user_id)
+        return bool((profile.display_name or "").strip())
 
     @database_sync_to_async
     def set_member_inactive(self, room, user_id):
@@ -1022,19 +1415,33 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
 
     @database_sync_to_async
     def get_active_members(self, room):
+        from authapp.models import PlayerProfile
+
         members = (
             RoomMember.objects.filter(room=room, is_active=True)
             .select_related("user")
             .order_by("joined_at")
         )
-        return [
-            {
-                "id": member.user_id,
-                "name": member.user.get_full_name() or member.user.email,
-                "email": member.user.email,
-            }
-            for member in members
-        ]
+        result = []
+        for member in members:
+            user = member.user
+            profile, _ = PlayerProfile.objects.get_or_create(user=user)
+            name = profile.display_name.strip() if profile.display_name else ""
+            if not name:
+                name = user.first_name or user.email.split("@")[0] or f"Player {user.id}"
+            result.append(
+                {
+                    "id": member.user_id,
+                    "name": name,
+                    "avatar": {
+                        "color": profile.avatar_color,
+                        "eyes": profile.avatar_eyes,
+                        "mouth": profile.avatar_mouth,
+                        "accessory": profile.avatar_accessory,
+                    },
+                }
+            )
+        return result
 
     @database_sync_to_async
     def get_active_member_ids(self, code):
@@ -1055,12 +1462,47 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
     def get_rooms_snapshot(self):
         return rooms_snapshot()
 
+    @database_sync_to_async
+    def get_public_user(self, user_id: int):
+        User = get_user_model()
+        from authapp.models import PlayerProfile
+
+        user = User.objects.filter(id=user_id).first()
+        if not user:
+            return {
+                "id": user_id,
+                "name": f"Player {user_id}",
+                "avatar": {
+                    "color": "#5eead4",
+                    "eyes": "dot",
+                    "mouth": "smile",
+                    "accessory": "none",
+                },
+            }
+        profile, _ = PlayerProfile.objects.get_or_create(user=user)
+        name = profile.display_name.strip() if profile.display_name else ""
+        if not name:
+            name = user.first_name or user.email.split("@")[0] or f"Player {user.id}"
+        return {
+            "id": user.id,
+            "name": name,
+            "avatar": {
+                "color": profile.avatar_color,
+                "eyes": profile.avatar_eyes,
+                "mouth": profile.avatar_mouth,
+                "accessory": profile.avatar_accessory,
+            },
+        }
+
 
 class LobbyConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         user = self.scope.get("user")
         if not user or isinstance(user, AnonymousUser) or user.is_anonymous:
             await self.close(code=4401)
+            return
+        if not await self.is_user_allowed(user.id):
+            await self.close(code=4403)
             return
         await self.channel_layer.group_add("rooms_lobby", self.channel_name)
         await self.accept()
@@ -1083,3 +1525,10 @@ class LobbyConsumer(AsyncJsonWebsocketConsumer):
     @database_sync_to_async
     def get_rooms_snapshot(self):
         return rooms_snapshot()
+
+    @database_sync_to_async
+    def is_user_allowed(self, user_id: int) -> bool:
+        from authapp.models import UserStatus
+
+        status_row, _ = UserStatus.objects.get_or_create(user_id=user_id)
+        return not status_row.is_deleted and not status_row.is_banned

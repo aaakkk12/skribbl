@@ -32,7 +32,7 @@ export default function SignupPage() {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      router.push("/dashboard");
+      router.push("/profile/setup");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Signup failed");
     } finally {
@@ -41,8 +41,8 @@ export default function SignupPage() {
   };
 
   return (
-    <main className="container">
-      <section className="auth-card">
+    <main className="container auth-shell">
+      <section className="auth-card auth-card-form">
         <div className="nav-row">
           <div>
             <span className="kicker">Get started</span>

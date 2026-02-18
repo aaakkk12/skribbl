@@ -6,8 +6,10 @@ from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db.models import Count, Q
 from django.utils.encoding import force_bytes
 from django.utils.http import urlsafe_base64_encode
+from secrets import compare_digest
+import logging
 from rest_framework import status
-from rest_framework.permissions import BasePermission
+from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -19,6 +21,7 @@ from realtime.models import Room, RoomMember
 from .models import ActiveSession, UserStatus
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 def _admin_signer():
@@ -56,12 +59,15 @@ class AdminCookiePermission(BasePermission):
 
 
 class AdminLoginView(APIView):
-    permission_classes = []
+    permission_classes = [AllowAny]
+    throttle_scope = "auth_login"
 
     def post(self, request):
         username = (request.data.get("username") or "").strip()
         password = (request.data.get("password") or "").strip()
-        if username != settings.ADMIN_USERNAME or password != settings.ADMIN_PASSWORD:
+        valid_username = compare_digest(username, settings.ADMIN_USERNAME)
+        valid_password = compare_digest(password, settings.ADMIN_PASSWORD)
+        if not (valid_username and valid_password):
             return Response(
                 {"detail": "Invalid admin credentials."},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -180,8 +186,12 @@ class AdminPasswordResetView(APIView):
         )
         try:
             send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email])
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Admin password reset email failed for user_id=%s: %s", user.id, exc)
+            return Response(
+                {"detail": "Unable to send email right now."},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
 
         return Response({"detail": "Reset link sent."})
 
@@ -222,6 +232,7 @@ class AdminUserActionView(APIView):
 
         if action == "ban":
             status_row.is_banned = True
+            ActiveSession.objects.filter(user=user).delete()
         elif action == "unban":
             status_row.is_banned = False
         elif action == "delete":

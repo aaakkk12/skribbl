@@ -2,11 +2,16 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "../../../lib/api";
+
+type MeResponse = {
+  profile_completed: boolean;
+};
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -21,7 +26,13 @@ export default function LoginPage() {
         method: "POST",
         body: JSON.stringify({ email, password }),
       });
-      router.push("/dashboard");
+      const me = await apiFetch<MeResponse>("/api/auth/me/", { method: "GET" });
+      const nextPath = searchParams.get("next");
+      if (me.profile_completed && nextPath && nextPath.startsWith("/")) {
+        router.push(nextPath);
+      } else {
+        router.push(me.profile_completed ? "/dashboard" : "/profile/setup");
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
     } finally {
@@ -30,8 +41,8 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="container">
-      <section className="auth-card">
+    <main className="container auth-shell">
+      <section className="auth-card auth-card-form">
         <div className="nav-row">
           <div>
             <span className="kicker">Welcome back</span>

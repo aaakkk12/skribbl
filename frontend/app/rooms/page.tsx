@@ -3,13 +3,29 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "../../lib/api";
+import {
+  addFriend,
+  apiFetch,
+  getFriends,
+  listRoomInvites,
+  respondRoomInvite,
+  searchUsers,
+  unfriend,
+  type FriendUser,
+  type IncomingInvite,
+} from "../../lib/api";
+import PlayerAvatar from "../../components/PlayerAvatar";
 
 type RoomSummary = {
   code: string;
   active_count: number;
   max_players: number;
   is_full: boolean;
+  is_private: boolean;
+};
+
+type MeResponse = {
+  profile_completed: boolean;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -25,6 +41,12 @@ export default function RoomsPage() {
   const [visibility, setVisibility] = useState<"open" | "private">("open");
   const [createPassword, setCreatePassword] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
+  const [incomingInvites, setIncomingInvites] = useState<IncomingInvite[]>([]);
+  const [inviteLoadingId, setInviteLoadingId] = useState<number | null>(null);
+  const [friendQuery, setFriendQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<FriendUser[]>([]);
+  const [friends, setFriends] = useState<FriendUser[]>([]);
+  const [friendLoadingId, setFriendLoadingId] = useState<number | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttempts = useRef(0);
   const lobbySocket = useRef<WebSocket | null>(null);
@@ -32,7 +54,13 @@ export default function RoomsPage() {
   useEffect(() => {
     const ensureAuth = async () => {
       try {
-        await apiFetch("/api/auth/me/", { method: "GET" });
+        const me = await apiFetch<MeResponse>("/api/auth/me/", { method: "GET" });
+        if (!me.profile_completed) {
+          router.push("/profile/setup");
+          return;
+        }
+        const friendResponse = await getFriends();
+        setFriends(friendResponse.friends || []);
       } catch {
         router.push("/login");
       }
@@ -52,6 +80,49 @@ export default function RoomsPage() {
       }
     };
     fetchRooms();
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const runSearch = async () => {
+      const term = friendQuery.trim();
+      if (term.length < 2) {
+        setSearchResults([]);
+        return;
+      }
+      try {
+        const response = await searchUsers(term);
+        if (!active) return;
+        setSearchResults(response.results || []);
+      } catch {
+        if (!active) return;
+        setSearchResults([]);
+      }
+    };
+    const timer = setTimeout(runSearch, 250);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [friendQuery]);
+
+  useEffect(() => {
+    let mounted = true;
+    const loadInvites = async () => {
+      try {
+        const response = await listRoomInvites();
+        if (!mounted) return;
+        setIncomingInvites(response.received || []);
+      } catch {
+        // ignore silently
+      }
+    };
+    loadInvites();
+    const interval = setInterval(loadInvites, 5000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -170,6 +241,59 @@ export default function RoomsPage() {
     }
   };
 
+  const handleInviteAction = async (inviteId: number, action: "accept" | "reject") => {
+    setInviteLoadingId(inviteId);
+    setError("");
+    try {
+      const response = await respondRoomInvite(inviteId, action);
+      setIncomingInvites((prev) => prev.filter((invite) => invite.id !== inviteId));
+      if (action === "accept" && response.code) {
+        router.push(`/room/${response.code}`);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to handle invite.");
+    } finally {
+      setInviteLoadingId(null);
+    }
+  };
+
+  const refreshFriends = async () => {
+    const response = await getFriends();
+    setFriends(response.friends || []);
+  };
+
+  const handleAddFriend = async (userId: number) => {
+    setError("");
+    setFriendLoadingId(userId);
+    try {
+      await addFriend(userId);
+      await refreshFriends();
+      setSearchResults((prev) =>
+        prev.map((item) => (item.id === userId ? { ...item, is_friend: true } : item))
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to add friend.");
+    } finally {
+      setFriendLoadingId(null);
+    }
+  };
+
+  const handleUnfriend = async (userId: number) => {
+    setError("");
+    setFriendLoadingId(userId);
+    try {
+      await unfriend(userId);
+      await refreshFriends();
+      setSearchResults((prev) =>
+        prev.map((item) => (item.id === userId ? { ...item, is_friend: false } : item))
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to unfriend.");
+    } finally {
+      setFriendLoadingId(null);
+    }
+  };
+
   return (
     <main className="container">
       <section className="auth-card">
@@ -250,7 +374,115 @@ export default function RoomsPage() {
             </form>
           </div>
         </div>
+        <div className="social-grid">
+          <div className="social-card">
+            <h3>Search players</h3>
+            <input
+              className="social-input"
+              value={friendQuery}
+              onChange={(event) => setFriendQuery(event.target.value)}
+              placeholder="Search by name or email"
+            />
+            <div className="social-list">
+              {searchResults.length === 0 ? (
+                <p className="helper">Type at least 2 characters to search.</p>
+              ) : (
+                searchResults.map((user) => (
+                  <div key={user.id} className="social-row">
+                    <div className="social-user">
+                      <PlayerAvatar avatar={user.avatar} size={30} />
+                      <div>
+                        <strong>{user.name}</strong>
+                        <p className="helper">{user.email}</p>
+                      </div>
+                    </div>
+                    {user.is_friend ? (
+                      <button
+                        className="button button-ghost"
+                        type="button"
+                        disabled={friendLoadingId === user.id}
+                        onClick={() => handleUnfriend(user.id)}
+                      >
+                        Unfriend
+                      </button>
+                    ) : (
+                      <button
+                        className="button button-primary"
+                        type="button"
+                        disabled={friendLoadingId === user.id}
+                        onClick={() => handleAddFriend(user.id)}
+                      >
+                        Add friend
+                      </button>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+          <div className="social-card">
+            <h3>My friends</h3>
+            <div className="social-list">
+              {friends.length === 0 ? (
+                <p className="helper">No friends yet.</p>
+              ) : (
+                friends.map((friend) => (
+                  <div key={friend.id} className="social-row">
+                    <div className="social-user">
+                      <PlayerAvatar avatar={friend.avatar} size={30} />
+                      <div>
+                        <strong>{friend.name}</strong>
+                        <p className="helper">{friend.email}</p>
+                      </div>
+                    </div>
+                    <button
+                      className="button button-ghost"
+                      type="button"
+                      disabled={friendLoadingId === friend.id}
+                      onClick={() => handleUnfriend(friend.id)}
+                    >
+                      Unfriend
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
         {error ? <p className="error">{error}</p> : null}
+        {incomingInvites.length > 0 ? (
+          <div className="invite-banner-list">
+            {incomingInvites.map((invite) => (
+              <div key={invite.id} className="invite-banner">
+                <div className="invite-banner-user">
+                  <PlayerAvatar avatar={invite.from_user.avatar} size={30} />
+                  <span>
+                    <strong>{invite.from_user.name}</strong> invited you to room{" "}
+                    <strong>{invite.room_code}</strong>
+                  </span>
+                </div>
+                <div className="invite-banner-actions">
+                  <button
+                    className="button button-ghost"
+                    type="button"
+                    disabled={inviteLoadingId === invite.id}
+                    onClick={() => handleInviteAction(invite.id, "reject")}
+                  >
+                    Reject
+                  </button>
+                  <button
+                    className="button button-primary"
+                    type="button"
+                    disabled={inviteLoadingId === invite.id}
+                    onClick={() => handleInviteAction(invite.id, "accept")}
+                  >
+                    Join
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="room-list-header">
           <span className={`status-dot status-${lobbyStatus}`} />
           <span className="helper">Live rooms</span>

@@ -1,58 +1,41 @@
+"use client";
+
 import Link from "next/link";
+import { useEffect } from "react";
+import { useRouter } from "next/navigation";
 
 export default function Home() {
+  const router = useRouter();
+
+  useEffect(() => {
+    router.prefetch("/login");
+    router.prefetch("/signup");
+  }, [router]);
+
   return (
-    <main className="container">
-      <section className="hero">
-        <span className="badge">ProAuth Stack</span>
-        <h1 className="hero-title">A professional auth experience, shipped fast.</h1>
-        <p className="hero-sub">
-          Secure JWT cookies, seamless reset flows, and a polished UI that feels
-          enterprise-ready. Django handles the heavy lifting while Next.js keeps
-          the UX smooth.
-        </p>
-        <div className="hero-actions">
-          <Link className="button button-primary" href="/signup">
-            Create account
-          </Link>
-          <Link className="button button-ghost" href="/login">
-            Sign in
-          </Link>
-        </div>
-      </section>
-      <section className="auth-card">
-        <div className="auth-grid">
-          <div>
-            <h2 className="hero-title" style={{ fontSize: "2rem" }}>
-              Built for teams who care about security and style.
-            </h2>
-            <p className="hero-sub">
-              Cookie-based JWTs keep tokens out of local storage, SMTP reset
-              links are ready for your provider, and the API is cleanly
-              separated for future mobile or desktop clients.
-            </p>
-          </div>
-          <div>
-            <div className="field">
-              <label>Included endpoints</label>
-              <div className="helper">
-                /api/auth/register · /login · /logout · /password-reset ·
-                /password-reset/confirm · /me
-              </div>
-            </div>
-            <div className="field" style={{ marginTop: "1rem" }}>
-              <label>Frontend flows</label>
-              <div className="helper">
-                Signup, login, reset request, reset confirm, and a protected
-                dashboard view.
-              </div>
-            </div>
+    <main className="container landing-shell">
+      <section className="landing-hero">
+        <div className="landing-orbit landing-orbit-a" />
+        <div className="landing-orbit landing-orbit-b" />
+        <div className="landing-content">
+          <span className="badge">Realtime Drawing Arena</span>
+          <h1 className="hero-title">Sketch fast. Guess faster. Win smart.</h1>
+          <p className="hero-sub">
+            Multiplayer drawing game with secure auth, private rooms, live
+            lobbies, and low-latency gameplay powered by Django, Next.js,
+            WebSockets, and Redis.
+          </p>
+          <div className="hero-actions">
+            <Link className="button button-primary" href="/signup">
+              Create Account
+            </Link>
+            <Link className="button button-ghost" href="/login">
+              Sign In
+            </Link>
           </div>
         </div>
       </section>
     </main>
   );
 }
-
-
 

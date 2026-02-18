@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    FriendDetailView,
+    FriendsView,
     RegisterView,
     LoginView,
     LogoutView,
@@ -8,6 +10,8 @@ from .views import (
     PasswordResetRequestView,
     PasswordResetConfirmView,
     MeView,
+    ProfileView,
+    UserSearchView,
 )
 
 urlpatterns = [
@@ -22,6 +26,10 @@ urlpatterns = [
         name="password_reset_confirm",
     ),
     path("me/", MeView.as_view(), name="me"),
+    path("profile/", ProfileView.as_view(), name="profile"),
+    path("users/search/", UserSearchView.as_view(), name="users_search"),
+    path("friends/", FriendsView.as_view(), name="friends"),
+    path("friends/<int:user_id>/", FriendDetailView.as_view(), name="friend_detail"),
 ]
 
 

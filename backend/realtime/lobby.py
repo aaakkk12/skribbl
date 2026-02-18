@@ -3,11 +3,13 @@ from channels.layers import get_channel_layer
 from django.db.models import Count, Q
 
 from .models import Room
+from .lifecycle import cleanup_inactive_rooms
 
 MAX_PLAYERS = 8
 
 
 def rooms_snapshot():
+    cleanup_inactive_rooms()
     rooms = (
         Room.objects.filter(is_active=True)
         .annotate(active_count=Count("members", filter=Q(members__is_active=True)))

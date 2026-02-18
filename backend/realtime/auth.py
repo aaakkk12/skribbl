@@ -8,7 +8,7 @@ from django.contrib.auth.models import AnonymousUser
 from rest_framework_simplejwt.backends import TokenBackend
 from rest_framework_simplejwt.settings import api_settings
 
-from authapp.models import ActiveSession
+from authapp.models import ActiveSession, UserStatus
 
 token_backend = TokenBackend(
     algorithm=api_settings.ALGORITHM,
@@ -31,7 +31,11 @@ def get_cookie(scope, name: str):
 def get_user(user_id):
     User = get_user_model()
     try:
-        return User.objects.get(id=user_id)
+        user = User.objects.get(id=user_id)
+        status_row, _ = UserStatus.objects.get_or_create(user=user)
+        if status_row.is_banned or status_row.is_deleted or not user.is_active:
+            return AnonymousUser()
+        return user
     except User.DoesNotExist:
         return AnonymousUser()
 

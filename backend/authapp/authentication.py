@@ -1,7 +1,7 @@
 from django.conf import settings
 from rest_framework_simplejwt.authentication import JWTAuthentication
 
-from .models import ActiveSession
+from .models import ActiveSession, UserStatus
 
 
 class CookieJWTAuthentication(JWTAuthentication):
@@ -18,6 +18,9 @@ class CookieJWTAuthentication(JWTAuthentication):
             return None
         active = ActiveSession.objects.filter(user=user).first()
         if not active or str(active.session_id) != str(session_id):
+            return None
+        status_row, _ = UserStatus.objects.get_or_create(user=user)
+        if status_row.is_banned or status_row.is_deleted or not user.is_active:
             return None
         return user, validated_token
 

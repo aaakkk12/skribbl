@@ -20,3 +20,11 @@ class CreateRoomSerializer(serializers.Serializer):
 class JoinRoomSerializer(serializers.Serializer):
     code = serializers.CharField(max_length=8)
     password = serializers.CharField(required=False, allow_blank=True)
+
+
+class SendInviteSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField()
+
+
+class RespondInviteSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=["accept", "reject"])
