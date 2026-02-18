@@ -1,4 +1,4 @@
-name: Deploy to EC2
+name: Deploy on EC2 Runner
 
 on:
   push:
@@ -6,13 +6,7 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - name: Deploy over SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            bash /home/ubuntu/gameapp/deploy.sh
+      - name: Run deploy script on server
+        run: bash /home/ubuntu/gameapp/deploy.sh
