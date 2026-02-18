@@ -18,7 +18,7 @@ export default function Home() {
         <div className="landing-orbit landing-orbit-a" />
         <div className="landing-orbit landing-orbit-b" />
         <div className="landing-content">
-          <span className="badge">Testing</span>
+          <span className="badge">Testing69</span>
           <h1 className="hero-title">Sketch fast. Guess faster. Win smart.</h1>
           <p className="hero-sub">
             Multiplayer drawing game with secure auth, private rooms, live
