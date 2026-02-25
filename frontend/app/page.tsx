@@ -133,7 +133,7 @@ export default function Home() {
             Choose your character
           </h1>
           <p className="helper">
-            Username set karo, character pick karo, phir direct room lobby me enter karo.
+            Set your username, pick a character, and enter the room lobby directly.
           </p>
         </div>
 

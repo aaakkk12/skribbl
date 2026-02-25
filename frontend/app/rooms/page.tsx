@@ -121,7 +121,7 @@ export default function RoomsPage() {
   const handleCreate = async () => {
     setError("");
     if (visibility === "private" && !createPassword.trim()) {
-      setError("Private room ke liye password required hai.");
+      setError("Password is required for private rooms.");
       return;
     }
     setLoading(true);
@@ -179,7 +179,7 @@ export default function RoomsPage() {
     try {
       let password = "";
       if (isPrivate) {
-        password = window.prompt(`Room ${roomCode} password enter karo`) || "";
+        password = window.prompt(`Enter password for room ${roomCode}`) || "";
         if (!password) {
           setLoading(false);
           return;
@@ -213,7 +213,7 @@ export default function RoomsPage() {
           <div className="room-card-lite">
             <div className="room-card-head">
               <h3>Create room</h3>
-              <span className="helper">Open ya private choose karo</span>
+              <span className="helper">Choose open or private</span>
             </div>
             <div className="room-card-body">
               <div className="room-visibility">
@@ -247,7 +247,7 @@ export default function RoomsPage() {
           <div className="room-card-lite">
             <div className="room-card-head">
               <h3>Join room</h3>
-              <span className="helper">Code paste karo aur join karo</span>
+              <span className="helper">Paste the code and join</span>
             </div>
             <form onSubmit={handleJoin} className="room-join">
               <input
@@ -274,7 +274,7 @@ export default function RoomsPage() {
           <button className="button button-primary" type="button" onClick={handleRandomJoin} disabled={loading}>
             Join Random Room
           </button>
-          <span className="helper">Sirf joinable public rooms me random pick hota hai.</span>
+          <span className="helper">Random join picks from available public rooms only.</span>
         </div>
 
         {error ? <p className="error">{error}</p> : null}
@@ -285,7 +285,7 @@ export default function RoomsPage() {
         </div>
         <div className="room-list">
           {rooms.length === 0 ? (
-            <p className="helper">No Rooms active.</p>
+            <p className="helper">No active rooms.</p>
           ) : (
             rooms.map((room) => (
               <div key={room.code} className="room-card">
