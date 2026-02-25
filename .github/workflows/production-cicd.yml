@@ -90,6 +90,6 @@ jobs:
             -o BatchMode=yes \
             -o StrictHostKeyChecking=yes \
             "${DEPLOY_USER}@${DEPLOY_HOST}" \
-            "sudo bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main"
+            "sudo env SYNC_NGINX_TEMPLATE=false bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main"
 
           rm -f ~/.ssh/id_ed25519
