@@ -9,6 +9,7 @@ VENV_DIR="${VENV_DIR:-$APP_ROOT/venv}"
 BACKEND_DIR="$APP_DIR/backend"
 FRONTEND_DIR="$APP_DIR/frontend"
 BRANCH="${1:-main}"
+SYNC_NGINX_TEMPLATE="${SYNC_NGINX_TEMPLATE:-false}"
 
 if [[ "$EUID" -ne 0 ]]; then
   echo "Run as root: sudo bash deploy/scripts/deploy_pull.sh <branch>"
@@ -52,11 +53,18 @@ echo "[5/7] Building frontend production bundle..."
 run_as_app "ln -sfn /etc/onlinedrawinggame/frontend.env '$FRONTEND_DIR/.env.production.local'"
 run_as_app "cd '$FRONTEND_DIR' && npm run build"
 
-echo "[6/7] Syncing latest service/nginx templates..."
+echo "[6/7] Syncing latest service templates..."
 install -m 0644 "$APP_DIR/deploy/systemd/onlinedrawinggame-backend.service" /etc/systemd/system/onlinedrawinggame-backend.service
 install -m 0644 "$APP_DIR/deploy/systemd/onlinedrawinggame-frontend.service" /etc/systemd/system/onlinedrawinggame-frontend.service
-install -m 0644 "$APP_DIR/deploy/nginx/onlinedrawinggame.online.conf" /etc/nginx/sites-available/onlinedrawinggame.online.conf
-ln -sf /etc/nginx/sites-available/onlinedrawinggame.online.conf /etc/nginx/sites-enabled/onlinedrawinggame.online.conf
+
+NGINX_SITE="/etc/nginx/sites-available/onlinedrawinggame.online.conf"
+if [[ "$SYNC_NGINX_TEMPLATE" == "true" || ! -f "$NGINX_SITE" ]]; then
+  install -m 0644 "$APP_DIR/deploy/nginx/onlinedrawinggame.online.conf" "$NGINX_SITE"
+  ln -sf "$NGINX_SITE" /etc/nginx/sites-enabled/onlinedrawinggame.online.conf
+  echo "Nginx template synced from repository."
+else
+  echo "Skipping nginx template sync to preserve existing server TLS/certbot config."
+fi
 
 echo "[7/7] Restarting services..."
 systemctl daemon-reload

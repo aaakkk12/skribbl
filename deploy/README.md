@@ -64,6 +64,14 @@ sudo bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main
 
 This pulls latest code, installs deps, runs migrations, collects static files, builds Next.js, and restarts services.
 
+Note:
+- `deploy_pull.sh` does **not** overwrite your nginx site config by default (to avoid removing Certbot-managed HTTPS blocks).
+- If you intentionally want to replace nginx config from repo template, run:
+
+```bash
+sudo SYNC_NGINX_TEMPLATE=true bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main
+```
+
 ## 5) Enable HTTPS (Certbot)
 After DNS is resolving:
 
