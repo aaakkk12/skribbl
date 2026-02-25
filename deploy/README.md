@@ -78,3 +78,36 @@ sudo systemctl status onlinedrawinggame-frontend.service
 sudo systemctl status nginx
 curl -I https://onlinedrawinggame.online
 ```
+
+## 7) Enable auto deploy with GitHub Actions (CI/CD)
+This repo includes `.github/workflows/production-cicd.yml`.
+
+It will:
+- Run CI on push to `main` (`manage.py check`, frontend lint, frontend build)
+- SSH into your EC2 and run:
+  - `sudo bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main`
+
+### 7.1 Add GitHub repository secrets
+In GitHub: `Settings -> Secrets and variables -> Actions -> New repository secret`
+
+Required:
+- `PROD_HOST` (example: `onlinedrawinggame.online` or your EC2 public IP)
+- `PROD_SSH_USER` (example: `ubuntu`)
+- `PROD_SSH_PRIVATE_KEY` (private key content for SSH login)
+
+Optional:
+- `PROD_SSH_PORT` (default `22`)
+
+### 7.2 Allow passwordless sudo for deploy command
+On EC2, add a restricted sudoers rule for the SSH user used by the workflow.
+If your SSH user is `ubuntu`:
+
+```bash
+echo 'ubuntu ALL=(root) NOPASSWD:/bin/bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main' | sudo tee /etc/sudoers.d/onlinedrawinggame-cicd
+sudo chmod 440 /etc/sudoers.d/onlinedrawinggame-cicd
+sudo visudo -cf /etc/sudoers.d/onlinedrawinggame-cicd
+```
+
+### 7.3 First run
+- Push to `main`, or
+- Trigger manually from `Actions -> Production CI/CD -> Run workflow`

@@ -96,6 +96,11 @@ sudo bash /srv/onlinedrawinggame/app/deploy/scripts/deploy_pull.sh main
 sudo bash /srv/onlinedrawinggame/app/deploy/scripts/setup_certbot.sh your-email@example.com
 ```
 
+### Optional: GitHub Actions CI/CD
+- Workflow file: `.github/workflows/production-cicd.yml`
+- On push to `main`, CI runs and then server deploy is triggered via SSH.
+- Setup details: `deploy/README.md` section "Enable auto deploy with GitHub Actions (CI/CD)".
+
 Detailed guide: `deploy/README.md`
 
 ## WebSocket Endpoints
