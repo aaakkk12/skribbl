@@ -1,7 +1,31 @@
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 const API_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_API_TIMEOUT_MS || "10000");
 const API_RETRY_COUNT = Number(process.env.NEXT_PUBLIC_API_RETRY_COUNT || "1");
 const RETRYABLE_METHODS = new Set(["GET", "HEAD"]);
+
+function normalizeBaseUrl(url: string): string {
+  return url.replace(/\/+$/, "");
+}
+
+export function resolveApiBaseUrl(): string {
+  const configuredBase = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+  if (configuredBase) {
+    return normalizeBaseUrl(configuredBase);
+  }
+
+  if (typeof window !== "undefined") {
+    const { hostname, origin } = window.location;
+    if (hostname === "localhost" || hostname === "127.0.0.1") {
+      return "http://localhost:8000";
+    }
+    return origin;
+  }
+
+  return "http://localhost:8000";
+}
+
+export function resolveWsBaseUrl(): string {
+  return resolveApiBaseUrl().replace(/^http/i, "ws");
+}
 
 type ApiError = {
   detail?: string;
@@ -45,7 +69,8 @@ async function refreshAccessToken(): Promise<boolean> {
   }
   refreshPromise = (async () => {
     try {
-      const response = await fetch(`${API_BASE}/api/auth/token/refresh/`, {
+      const apiBase = resolveApiBaseUrl();
+      const response = await fetch(`${apiBase}/api/auth/token/refresh/`, {
         method: "POST",
         credentials: "include",
         headers: {
@@ -84,7 +109,8 @@ export async function apiFetch<T>(
 
   let response: Response;
   try {
-    response = await fetch(`${API_BASE}${path}`, {
+    const apiBase = resolveApiBaseUrl();
+    response = await fetch(`${apiBase}${path}`, {
       ...options,
       method,
       headers,

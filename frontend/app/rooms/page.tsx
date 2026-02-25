@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "../../lib/api";
+import { apiFetch, resolveWsBaseUrl } from "../../lib/api";
 
 type RoomSummary = {
   code: string;
@@ -16,9 +16,6 @@ type MeResponse = {
   display_name: string;
   first_name: string;
 };
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 export default function RoomsPage() {
   const router = useRouter();
@@ -78,7 +75,7 @@ export default function RoomsPage() {
         return;
       }
 
-      const socket = new WebSocket(`${WS_BASE}/ws/lobby/`);
+      const socket = new WebSocket(`${resolveWsBaseUrl()}/ws/lobby/`);
       lobbySocket.current = socket;
 
       socket.onopen = () => {

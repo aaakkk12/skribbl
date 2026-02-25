@@ -41,14 +41,14 @@ run_as_app "'$VENV_DIR/bin/pip' install --upgrade pip wheel"
 run_as_app "'$VENV_DIR/bin/pip' install -r '$BACKEND_DIR/requirements.txt'"
 
 echo "[3/7] Applying backend migrations/static build..."
-run_as_app "cd '$BACKEND_DIR' && '$VENV_DIR/bin/python' manage.py migrate --noinput"
-run_as_app "cd '$BACKEND_DIR' && '$VENV_DIR/bin/python' manage.py collectstatic --noinput"
+run_as_app "set -a && source /etc/onlinedrawinggame/backend.env && set +a && cd '$BACKEND_DIR' && '$VENV_DIR/bin/python' manage.py migrate --noinput"
+run_as_app "set -a && source /etc/onlinedrawinggame/backend.env && set +a && cd '$BACKEND_DIR' && '$VENV_DIR/bin/python' manage.py collectstatic --noinput"
 
 echo "[4/7] Installing/updating frontend dependencies..."
 run_as_app "cd '$FRONTEND_DIR' && npm ci"
 
 echo "[5/7] Building frontend production bundle..."
-run_as_app "cd '$FRONTEND_DIR' && npm run build"
+run_as_app "set -a && source /etc/onlinedrawinggame/frontend.env && set +a && cd '$FRONTEND_DIR' && npm run build"
 
 echo "[6/7] Syncing latest service/nginx templates..."
 install -m 0644 "$APP_DIR/deploy/systemd/onlinedrawinggame-backend.service" /etc/systemd/system/onlinedrawinggame-backend.service

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiFetch } from "../../../lib/api";
+import { apiFetch, resolveApiBaseUrl, resolveWsBaseUrl } from "../../../lib/api";
 import PlayerAvatar, { type AvatarConfig } from "../../../components/PlayerAvatar";
 
 type Member = {
@@ -57,9 +57,6 @@ type KickModal = {
   votes: number;
   required: number;
 };
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
-const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 export default function RoomClient({ code }: { code: string }) {
   const router = useRouter();
@@ -178,7 +175,7 @@ export default function RoomClient({ code }: { code: string }) {
       // ignore socket send failures during unload
     }
     try {
-      void fetch(`${API_BASE}/api/rooms/leave/`, {
+      void fetch(`${resolveApiBaseUrl()}/api/rooms/leave/`, {
         method: "POST",
         credentials: "include",
         headers: {
@@ -270,7 +267,7 @@ export default function RoomClient({ code }: { code: string }) {
         return;
       }
 
-      const socket = new WebSocket(`${WS_BASE}/ws/rooms/${code.toUpperCase()}/`);
+      const socket = new WebSocket(`${resolveWsBaseUrl()}/ws/rooms/${code.toUpperCase()}/`);
       socketRef.current = socket;
 
       socket.onopen = () => {

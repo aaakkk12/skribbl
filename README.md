@@ -38,9 +38,9 @@ DEBUG=False
 DJANGO_SECRET_KEY=<50+ char secret>
 ALLOWED_HOSTS=onlinedrawinggame.online,www.onlinedrawinggame.online,<EC2_PUBLIC_IP>
 
-CORS_ALLOWED_ORIGINS=https://onlinedrawinggame.online
-CSRF_TRUSTED_ORIGINS=https://onlinedrawinggame.online
-WS_ALLOWED_ORIGINS=https://onlinedrawinggame.online
+CORS_ALLOWED_ORIGINS=https://onlinedrawinggame.online,https://www.onlinedrawinggame.online
+CSRF_TRUSTED_ORIGINS=https://onlinedrawinggame.online,https://www.onlinedrawinggame.online
+WS_ALLOWED_ORIGINS=https://onlinedrawinggame.online,https://www.onlinedrawinggame.online
 
 DB_ENGINE=postgres
 DB_NAME=app
