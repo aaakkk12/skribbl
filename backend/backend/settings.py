@@ -179,8 +179,6 @@ STATIC_URL = "/static/"
 STATIC_ROOT = os.getenv("STATIC_ROOT", str(BASE_DIR / "staticfiles"))
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-
 # CORS / CSRF
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = env_list("CORS_ALLOWED_ORIGINS", "http://localhost:3000")
@@ -190,22 +188,13 @@ CSRF_TRUSTED_ORIGINS = env_list("CSRF_TRUSTED_ORIGINS", ",".join(CORS_ALLOWED_OR
 CORS_PREFLIGHT_MAX_AGE = 86400
 WS_ALLOWED_ORIGINS = env_list("WS_ALLOWED_ORIGINS", ",".join(CORS_ALLOWED_ORIGINS))
 
-# Email (SMTP)
-EMAIL_BACKEND = os.getenv(
-    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
-)
-EMAIL_HOST = os.getenv("EMAIL_HOST", "")
-EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
-EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
-EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
-EMAIL_USE_TLS = env_bool("EMAIL_USE_TLS", default=True)
-DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER)
-
 # JWT cookie settings
 JWT_COOKIE_SECURE = env_bool("JWT_COOKIE_SECURE", default=IS_PRODUCTION)
 JWT_COOKIE_SAMESITE = os.getenv("JWT_COOKIE_SAMESITE", "Lax")
 JWT_ACCESS_COOKIE = os.getenv("JWT_ACCESS_COOKIE", "access_token")
 JWT_REFRESH_COOKIE = os.getenv("JWT_REFRESH_COOKIE", "refresh_token")
+GUEST_DEVICE_COOKIE = os.getenv("GUEST_DEVICE_COOKIE", "guest_device_id")
+GUEST_DEVICE_COOKIE_MAX_AGE = int(os.getenv("GUEST_DEVICE_COOKIE_MAX_AGE", str(60 * 60 * 24 * 365)))
 if IS_PRODUCTION and not JWT_COOKIE_SECURE:
     raise ImproperlyConfigured("JWT_COOKIE_SECURE must be True in production.")
 
@@ -248,13 +237,9 @@ REST_FRAMEWORK = {
         "anon": os.getenv("THROTTLE_ANON", "60/min"),
         "user": os.getenv("THROTTLE_USER", "300/min"),
         "auth_login": os.getenv("THROTTLE_AUTH_LOGIN", "10/min"),
-        "auth_register": os.getenv("THROTTLE_AUTH_REGISTER", "5/min"),
-        "auth_password_reset": os.getenv("THROTTLE_AUTH_PASSWORD_RESET", "5/hour"),
+        "guest_session": os.getenv("THROTTLE_GUEST_SESSION", "20/min"),
         "room_join": os.getenv("THROTTLE_ROOM_JOIN", "30/min"),
         "room_create": os.getenv("THROTTLE_ROOM_CREATE", "10/min"),
-        "user_search": os.getenv("THROTTLE_USER_SEARCH", "90/min"),
-        "friend_action": os.getenv("THROTTLE_FRIEND_ACTION", "60/min"),
-        "room_invite": os.getenv("THROTTLE_ROOM_INVITE", "60/min"),
     },
 }
 
@@ -294,7 +279,7 @@ LOGGING = {
 # Maintenance / data retention
 INACTIVE_ACCOUNT_DAYS = int(os.getenv("INACTIVE_ACCOUNT_DAYS", "7"))
 INACTIVE_ROOM_RETENTION_DAYS = int(os.getenv("INACTIVE_ROOM_RETENTION_DAYS", "14"))
-EMPTY_ROOM_DELETE_MINUTES = int(os.getenv("EMPTY_ROOM_DELETE_MINUTES", "10"))
+EMPTY_ROOM_DELETE_MINUTES = int(os.getenv("EMPTY_ROOM_DELETE_MINUTES", "1"))
 ROOM_HISTORY_TTL_SECONDS = int(os.getenv("ROOM_HISTORY_TTL_SECONDS", str(60 * 60 * 24 * 7)))
 ROOM_STATE_TTL_SECONDS = int(os.getenv("ROOM_STATE_TTL_SECONDS", str(60 * 60 * 24)))
 STORAGE_MAX_GB = float(os.getenv("STORAGE_MAX_GB", "20"))

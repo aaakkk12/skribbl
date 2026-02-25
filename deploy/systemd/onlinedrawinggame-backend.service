@@ -1,0 +1,19 @@
+[Unit]
+Description=Online Drawing Game Backend (Daphne ASGI)
+After=network.target redis-server.service
+Wants=redis-server.service
+
+[Service]
+Type=simple
+User=webapp
+Group=www-data
+WorkingDirectory=/srv/onlinedrawinggame/app/backend
+EnvironmentFile=/etc/onlinedrawinggame/backend.env
+ExecStart=/srv/onlinedrawinggame/venv/bin/daphne -b 127.0.0.1 -p 8000 backend.asgi:application
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

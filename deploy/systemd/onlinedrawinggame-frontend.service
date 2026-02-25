@@ -1,0 +1,20 @@
+[Unit]
+Description=Online Drawing Game Frontend (Next.js)
+After=network.target onlinedrawinggame-backend.service
+Wants=onlinedrawinggame-backend.service
+
+[Service]
+Type=simple
+User=webapp
+Group=www-data
+WorkingDirectory=/srv/onlinedrawinggame/app/frontend
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/onlinedrawinggame/frontend.env
+ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3000
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+[Install]
+WantedBy=multi-user.target

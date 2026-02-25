@@ -108,13 +108,12 @@ export async function apiFetch<T>(
 
   if (!response.ok) {
     const isRefreshPath = path.startsWith("/api/auth/token/refresh/");
-    const isAuthPath =
-      path.startsWith("/api/auth/login/") || path.startsWith("/api/auth/register/");
+    const isAuthBootstrapPath = path.startsWith("/api/auth/guest-session/");
     if (
       response.status === 401 &&
       allowRefresh &&
       !isRefreshPath &&
-      !isAuthPath
+      !isAuthBootstrapPath
     ) {
       const refreshed = await refreshAccessToken();
       if (refreshed) {
@@ -146,86 +145,35 @@ export type AvatarConfig = {
   accessory: "none" | "cap" | "crown" | "glasses";
 };
 
-export type FriendUser = {
-  id: number;
-  email: string;
-  name: string;
-  avatar: AvatarConfig;
-  friend_since?: string;
-  is_friend?: boolean;
+export type GuestCharacter =
+  | "sprinter"
+  | "captain"
+  | "vision"
+  | "joker"
+  | "royal"
+  | "ninja";
+
+export type GuestSessionResponse = {
+  device_id: string;
+  character: GuestCharacter;
+  user: {
+    id: number;
+    email: string;
+    first_name: string;
+    last_name: string;
+    display_name: string;
+    profile_completed: boolean;
+    avatar: AvatarConfig;
+  };
 };
 
-export type RoomInviteUser = {
-  id: number;
-  name: string;
-  avatar: AvatarConfig;
-};
-
-export type IncomingInvite = {
-  id: number;
-  room_code: string;
-  created_at: string;
-  from_user: RoomInviteUser;
-};
-
-export type OutgoingInvite = {
-  id: number;
-  room_code: string;
-  created_at: string;
-  to_user: RoomInviteUser;
-};
-
-export async function searchUsers(query: string) {
-  const encoded = encodeURIComponent(query.trim());
-  return apiFetch<{ results: FriendUser[] }>(`/api/auth/users/search/?q=${encoded}`, {
-    method: "GET",
-  });
-}
-
-export async function getFriends() {
-  return apiFetch<{ friends: FriendUser[] }>("/api/auth/friends/", {
-    method: "GET",
-  });
-}
-
-export async function addFriend(userId: number) {
-  return apiFetch<{ detail: string; friend?: FriendUser }>("/api/auth/friends/", {
+export async function createGuestSession(payload: {
+  username: string;
+  character: GuestCharacter;
+  device_id?: string;
+}) {
+  return apiFetch<GuestSessionResponse>("/api/auth/guest-session/", {
     method: "POST",
-    body: JSON.stringify({ user_id: userId }),
+    body: JSON.stringify(payload),
   });
 }
-
-export async function unfriend(userId: number) {
-  return apiFetch<{ detail: string }>(`/api/auth/friends/${userId}/`, {
-    method: "DELETE",
-  });
-}
-
-export async function sendRoomInvite(code: string, userId: number) {
-  return apiFetch<{ detail: string }>(`/api/rooms/${code.toUpperCase()}/invite/`, {
-    method: "POST",
-    body: JSON.stringify({ user_id: userId }),
-  });
-}
-
-export async function listRoomInvites() {
-  return apiFetch<{ received: IncomingInvite[]; sent: OutgoingInvite[] }>(
-    "/api/rooms/invites/",
-    {
-      method: "GET",
-    }
-  );
-}
-
-export async function respondRoomInvite(inviteId: number, action: "accept" | "reject") {
-  return apiFetch<{ detail: string; code?: string }>(
-    `/api/rooms/invites/${inviteId}/respond/`,
-    {
-      method: "POST",
-      body: JSON.stringify({ action }),
-    }
-  );
-}
-
-
-

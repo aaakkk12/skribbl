@@ -1,70 +1,46 @@
+import uuid
+
 from django.contrib.auth import get_user_model
-from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from .models import PlayerProfile, UserStatus
+from .models import PlayerProfile
 
 User = get_user_model()
 
+GUEST_CHARACTER_CHOICES = [
+    ("sprinter", "Sprinter"),
+    ("captain", "Captain"),
+    ("vision", "Vision"),
+    ("joker", "Joker"),
+    ("royal", "Royal"),
+    ("ninja", "Ninja"),
+]
 
-class RegisterSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    password = serializers.CharField(write_only=True, min_length=8)
-    first_name = serializers.CharField(required=False, allow_blank=True)
-    last_name = serializers.CharField(required=False, allow_blank=True)
 
-    def validate_email(self, value):
-        normalized = value.lower()
-        user = User.objects.filter(email__iexact=normalized).first()
-        if user:
-            status = getattr(user, "status", None)
-            if status and status.is_deleted:
-                raise serializers.ValidationError(
-                    "Account is archived. Ask admin to restore."
-                )
-            if status and status.is_banned:
-                raise serializers.ValidationError(
-                    "Account is banned. Contact support."
-                )
-            raise serializers.ValidationError("Email is already in use.")
+class GuestSessionSerializer(serializers.Serializer):
+    username = serializers.CharField(min_length=2, max_length=24)
+    character = serializers.ChoiceField(choices=GUEST_CHARACTER_CHOICES)
+    device_id = serializers.CharField(required=False, allow_blank=True, max_length=64)
+
+    def validate_username(self, value: str):
+        normalized = " ".join(value.strip().split())
+        if len(normalized) < 2:
+            raise serializers.ValidationError("Username must be at least 2 characters.")
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 _-")
+        if any(ch not in allowed for ch in normalized):
+            raise serializers.ValidationError(
+                "Username can contain letters, numbers, space, underscore, and hyphen only."
+            )
         return normalized
 
-    def validate_password(self, value):
-        validate_password(value)
-        return value
-
-    def create(self, validated_data):
-        email = validated_data["email"].lower()
-        user = User(
-            username=email,
-            email=email,
-            first_name=validated_data.get("first_name", ""),
-            last_name=validated_data.get("last_name", ""),
-        )
-        user.set_password(validated_data["password"])
-        user.save()
-        UserStatus.objects.get_or_create(user=user)
-        PlayerProfile.objects.get_or_create(user=user)
-        return user
-
-
-class LoginSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-    password = serializers.CharField(write_only=True)
-
-
-class PasswordResetRequestSerializer(serializers.Serializer):
-    email = serializers.EmailField()
-
-
-class PasswordResetConfirmSerializer(serializers.Serializer):
-    uid = serializers.CharField()
-    token = serializers.CharField()
-    new_password = serializers.CharField(write_only=True, min_length=8)
-
-    def validate_new_password(self, value):
-        validate_password(value)
-        return value
+    def validate_device_id(self, value: str):
+        raw = (value or "").strip().lower()
+        if not raw:
+            return None
+        try:
+            return str(uuid.UUID(raw))
+        except (ValueError, AttributeError):
+            return None
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -108,30 +84,3 @@ class UserSerializer(serializers.ModelSerializer):
             "mouth": profile.avatar_mouth,
             "accessory": profile.avatar_accessory,
         }
-
-
-class PlayerProfileSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = PlayerProfile
-        fields = [
-            "display_name",
-            "avatar_color",
-            "avatar_eyes",
-            "avatar_mouth",
-            "avatar_accessory",
-        ]
-
-    def validate_display_name(self, value):
-        name = value.strip()
-        if len(name) < 2:
-            raise serializers.ValidationError("Display name must be at least 2 characters.")
-        return name
-
-    def validate_avatar_color(self, value):
-        color = value.strip()
-        if len(color) != 7 or not color.startswith("#"):
-            raise serializers.ValidationError("Color must be a valid hex value like #5eead4.")
-        return color
-
-
-

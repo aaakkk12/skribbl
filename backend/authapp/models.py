@@ -2,7 +2,6 @@ import uuid
 
 from django.conf import settings
 from django.db import models
-from django.db.models import F, Q
 
 
 class ActiveSession(models.Model):
@@ -72,25 +71,6 @@ class PlayerProfile(models.Model):
 
     def __str__(self) -> str:
         return f"{self.user_id}:{self.display_name or 'profile'}"
-
-
-class Friendship(models.Model):
-    user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="friend_links"
-    )
-    friend = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="friend_of_links"
-    )
-    created_at = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["user", "friend"], name="unique_friend_link"),
-            models.CheckConstraint(check=~Q(user=F("friend")), name="no_self_friend"),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.user_id}->{self.friend_id}"
 
 
 

@@ -1,41 +1,190 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import PlayerAvatar, { type AvatarConfig } from "../components/PlayerAvatar";
+import {
+  createGuestSession,
+  type GuestCharacter,
+} from "../lib/api";
+
+type CharacterOption = {
+  id: GuestCharacter;
+  label: string;
+  tagline: string;
+  avatar: AvatarConfig;
+};
+
+type StoredProfile = {
+  username: string;
+  character: GuestCharacter;
+};
+
+const STORAGE_KEY = "drawing_guest_profile_v1";
+
+const CHARACTER_OPTIONS: CharacterOption[] = [
+  {
+    id: "sprinter",
+    label: "Sprinter",
+    tagline: "Fast starter",
+    avatar: { color: "#5eead4", eyes: "dot", mouth: "smile", accessory: "none" },
+  },
+  {
+    id: "captain",
+    label: "Captain",
+    tagline: "Team caller",
+    avatar: { color: "#1d4ed8", eyes: "happy", mouth: "smile", accessory: "cap" },
+  },
+  {
+    id: "vision",
+    label: "Vision",
+    tagline: "Sharp guesser",
+    avatar: { color: "#8b5cf6", eyes: "happy", mouth: "open", accessory: "glasses" },
+  },
+  {
+    id: "joker",
+    label: "Joker",
+    tagline: "Fun rounds",
+    avatar: { color: "#f97316", eyes: "happy", mouth: "open", accessory: "none" },
+  },
+  {
+    id: "royal",
+    label: "Royal",
+    tagline: "Big winner",
+    avatar: { color: "#f59e0b", eyes: "dot", mouth: "smile", accessory: "crown" },
+  },
+  {
+    id: "ninja",
+    label: "Ninja",
+    tagline: "Silent sniper",
+    avatar: { color: "#334155", eyes: "sleepy", mouth: "flat", accessory: "none" },
+  },
+];
 
 export default function Home() {
   const router = useRouter();
+  const [username, setUsername] = useState("");
+  const [character, setCharacter] = useState<GuestCharacter>("sprinter");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const selectedCharacter = useMemo(
+    () => CHARACTER_OPTIONS.find((item) => item.id === character) || CHARACTER_OPTIONS[0],
+    [character]
+  );
 
   useEffect(() => {
-    router.prefetch("/login");
-    router.prefetch("/signup");
+    router.prefetch("/rooms");
+    if (typeof window === "undefined") return;
+    try {
+      const raw = window.localStorage.getItem(STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<StoredProfile>;
+      if (typeof parsed.username === "string") {
+        setUsername(parsed.username);
+      }
+      if (typeof parsed.character === "string") {
+        const found = CHARACTER_OPTIONS.some((item) => item.id === parsed.character);
+        if (found) {
+          setCharacter(parsed.character as GuestCharacter);
+        }
+      }
+    } catch {
+      // ignore local storage parsing errors
+    }
   }, [router]);
 
+  const handleContinue = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setError("");
+    const trimmed = username.trim();
+    if (trimmed.length < 2) {
+      setError("Username must be at least 2 characters.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await createGuestSession({
+        username: trimmed,
+        character,
+      });
+      const payload: StoredProfile = {
+        username: trimmed,
+        character,
+      };
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+      }
+      router.push("/rooms");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to continue.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
-    <main className="container landing-shell">
-      <section className="landing-hero">
-        <div className="landing-orbit landing-orbit-a" />
-        <div className="landing-orbit landing-orbit-b" />
-        <div className="landing-content">
-          <span className="badge">Testing69</span>
-          <h1 className="hero-title">Sketch fast. Guess faster. Win smart.</h1>
-          <p className="hero-sub">
-            Multiplayer drawing game with secure auth, private rooms, live
-            lobbies, and low-latency gameplay powered by Django, Next.js,
-            WebSockets, and Redis.
+    <main className="container">
+      <section className="auth-card onboarding-shell">
+        <div className="onboarding-header">
+          <span className="badge">Online Drawing Game</span>
+          <h1 className="hero-title" style={{ fontSize: "2.4rem" }}>
+            Choose your character
+          </h1>
+          <p className="helper">
+            Username set karo, character pick karo, phir direct room lobby me enter karo.
           </p>
-          <div className="hero-actions">
-            <Link className="button button-primary" href="/signup">
-              Create Account
-            </Link>
-            <Link className="button button-ghost" href="/login">
-              Sign In
-            </Link>
-          </div>
         </div>
+
+        <form className="onboarding-form" onSubmit={handleContinue}>
+          <div className="field">
+            <label htmlFor="username">Username</label>
+            <input
+              id="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              placeholder="Enter your username"
+              maxLength={24}
+              autoComplete="off"
+              required
+            />
+          </div>
+
+          <div className="field">
+            <label>Character</label>
+            <div className="character-grid">
+              {CHARACTER_OPTIONS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  className={`character-card ${character === item.id ? "active" : ""}`}
+                  onClick={() => setCharacter(item.id)}
+                >
+                  <PlayerAvatar avatar={item.avatar} size={54} />
+                  <div>
+                    <strong>{item.label}</strong>
+                    <p>{item.tagline}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="onboarding-footer">
+            <div className="selected-preview">
+              <PlayerAvatar avatar={selectedCharacter.avatar} size={44} />
+              <span>
+                Ready as <strong>{selectedCharacter.label}</strong>
+              </span>
+            </div>
+            <button className="button button-primary" type="submit" disabled={loading}>
+              {loading ? "Joining..." : "Next"}
+            </button>
+          </div>
+          {error ? <p className="error">{error}</p> : null}
+        </form>
       </section>
     </main>
   );
 }
-

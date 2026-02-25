@@ -1,13 +1,8 @@
 from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.contrib.auth.tokens import default_token_generator
-from django.core.mail import send_mail
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db.models import Count, Q
-from django.utils.encoding import force_bytes
-from django.utils.http import urlsafe_base64_encode
 from secrets import compare_digest
-import logging
 from rest_framework import status
 from rest_framework.permissions import AllowAny, BasePermission
 from rest_framework.response import Response
@@ -21,7 +16,6 @@ from realtime.models import Room, RoomMember
 from .models import ActiveSession, UserStatus
 
 User = get_user_model()
-logger = logging.getLogger(__name__)
 
 
 def _admin_signer():
@@ -159,41 +153,8 @@ class AdminRoomDetailView(APIView):
                     "type": "admin_close",
                     "message": "Room closed by admin.",
                 },
-            )
-        return Response({"detail": "Room deleted."})
-
-
-class AdminPasswordResetView(APIView):
-    permission_classes = [AdminCookiePermission]
-
-    def post(self, request):
-        email = (request.data.get("email") or "").strip().lower()
-        user = User.objects.filter(email__iexact=email).first()
-        if not user:
-            return Response(
-                {"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND
-            )
-
-        uid = urlsafe_base64_encode(force_bytes(user.pk))
-        token = default_token_generator.make_token(user)
-        reset_link = f"{settings.FRONTEND_URL}/reset-password/confirm?uid={uid}&token={token}"
-
-        subject = "Admin sent you a password reset link"
-        message = (
-            "An admin generated a password reset link for your account.\n\n"
-            f"Reset link: {reset_link}\n\n"
-            "If you did not request this, please ignore this email."
         )
-        try:
-            send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email])
-        except Exception as exc:
-            logger.warning("Admin password reset email failed for user_id=%s: %s", user.id, exc)
-            return Response(
-                {"detail": "Unable to send email right now."},
-                status=status.HTTP_502_BAD_GATEWAY,
-            )
-
-        return Response({"detail": "Reset link sent."})
+        return Response({"detail": "Room deleted."})
 
 
 class AdminUsersView(APIView):

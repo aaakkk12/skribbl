@@ -40,36 +40,3 @@ class RoomMember(models.Model):
 
     def __str__(self) -> str:
         return f"{self.room.code}:{self.user_id}"
-
-
-class RoomInvite(models.Model):
-    STATUS_PENDING = "pending"
-    STATUS_ACCEPTED = "accepted"
-    STATUS_REJECTED = "rejected"
-    STATUS_CANCELLED = "cancelled"
-    STATUS_CHOICES = [
-        (STATUS_PENDING, "Pending"),
-        (STATUS_ACCEPTED, "Accepted"),
-        (STATUS_REJECTED, "Rejected"),
-        (STATUS_CANCELLED, "Cancelled"),
-    ]
-
-    room = models.ForeignKey(Room, on_delete=models.CASCADE, related_name="invites")
-    from_user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="sent_room_invites"
-    )
-    to_user = models.ForeignKey(
-        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="received_room_invites"
-    )
-    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
-    created_at = models.DateTimeField(auto_now_add=True)
-    responded_at = models.DateTimeField(null=True, blank=True)
-
-    class Meta:
-        indexes = [
-            models.Index(fields=["to_user", "status"]),
-            models.Index(fields=["room", "status"]),
-        ]
-
-    def __str__(self) -> str:
-        return f"{self.room.code}:{self.from_user_id}->{self.to_user_id}:{self.status}"

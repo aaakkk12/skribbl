@@ -67,9 +67,14 @@ def sync_room_empty_state(room_id: int) -> bool:
 
 
 def cleanup_inactive_rooms(empty_minutes: int | None = None) -> int:
+    configured_minutes = (
+        getattr(settings, "EMPTY_ROOM_DELETE_MINUTES", 1)
+        if empty_minutes is None
+        else empty_minutes
+    )
     retention_minutes = max(
-        1,
-        int(empty_minutes or getattr(settings, "EMPTY_ROOM_DELETE_MINUTES", 10)),
+        0,
+        int(configured_minutes),
     )
     now = timezone.now()
 

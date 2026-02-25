@@ -15,8 +15,8 @@ const body = Work_Sans({
 });
 
 export const metadata: Metadata = {
-  title: "ProAuth",
-  description: "A polished auth experience powered by Django + Next.js",
+  title: "Online Drawing Game",
+  description: "Realtime multiplayer drawing rooms with instant guest join flow.",
 };
 
 export default function RootLayout({

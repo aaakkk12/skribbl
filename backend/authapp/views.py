@@ -1,36 +1,60 @@
 import uuid
-import logging
 
 from django.conf import settings
-from django.contrib.auth import authenticate, get_user_model
-from django.contrib.auth.tokens import default_token_generator
-from django.core.mail import send_mail
+from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import Q
-from django.utils.encoding import force_str
-from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
-from django.utils.encoding import force_bytes
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
+from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import ActiveSession, Friendship, PlayerProfile, UserStatus
-from .serializers import (
-    RegisterSerializer,
-    LoginSerializer,
-    PasswordResetRequestSerializer,
-    PasswordResetConfirmSerializer,
-    PlayerProfileSerializer,
-    UserSerializer,
-)
+from .models import ActiveSession, PlayerProfile, UserStatus
+from .serializers import GuestSessionSerializer, UserSerializer
 
 User = get_user_model()
-logger = logging.getLogger(__name__)
+
+CHARACTER_PRESETS = {
+    "sprinter": {
+        "color": "#5eead4",
+        "eyes": "dot",
+        "mouth": "smile",
+        "accessory": "none",
+    },
+    "captain": {
+        "color": "#1d4ed8",
+        "eyes": "happy",
+        "mouth": "smile",
+        "accessory": "cap",
+    },
+    "vision": {
+        "color": "#8b5cf6",
+        "eyes": "happy",
+        "mouth": "open",
+        "accessory": "glasses",
+    },
+    "joker": {
+        "color": "#f97316",
+        "eyes": "happy",
+        "mouth": "open",
+        "accessory": "none",
+    },
+    "royal": {
+        "color": "#f59e0b",
+        "eyes": "dot",
+        "mouth": "smile",
+        "accessory": "crown",
+    },
+    "ninja": {
+        "color": "#334155",
+        "eyes": "sleepy",
+        "mouth": "flat",
+        "accessory": "none",
+    },
+}
 
 
 def _cookie_settings():
@@ -62,66 +86,130 @@ def _set_refresh_cookie(response, refresh_token):
     )
 
 
-class RegisterView(APIView):
+def _normalize_device_id(raw_value):
+    raw = (raw_value or "").strip().lower()
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, TypeError, AttributeError):
+        return None
+
+
+def _resolve_device_id(request, explicit_device_id):
+    resolved = _normalize_device_id(explicit_device_id)
+    if resolved:
+        return resolved
+    cookie_value = request.COOKIES.get(settings.GUEST_DEVICE_COOKIE)
+    resolved = _normalize_device_id(cookie_value)
+    if resolved:
+        return resolved
+    return str(uuid.uuid4())
+
+
+def _set_guest_device_cookie(response, device_id):
+    response.set_cookie(
+        settings.GUEST_DEVICE_COOKIE,
+        device_id,
+        max_age=settings.GUEST_DEVICE_COOKIE_MAX_AGE,
+        **_cookie_settings(),
+    )
+
+
+class GuestSessionView(APIView):
     permission_classes = [AllowAny]
-    throttle_scope = "auth_register"
+    throttle_scope = "guest_session"
 
     def post(self, request):
-        serializer = RegisterSerializer(data=request.data)
+        serializer = GuestSessionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        user = serializer.save()
-        PlayerProfile.objects.get_or_create(user=user)
-        return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
+        username = serializer.validated_data["username"]
+        character = serializer.validated_data["character"]
+        device_id = _resolve_device_id(request, serializer.validated_data.get("device_id"))
 
-class LoginView(APIView):
-    permission_classes = [AllowAny]
-    throttle_scope = "auth_login"
+        guest_key = device_id.replace("-", "")
+        guest_username = f"guest_{guest_key}"
+        guest_email = f"{guest_username}@guest.local"
+        avatar = CHARACTER_PRESETS[character]
 
-    def post(self, request):
-        serializer = LoginSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"].lower()
-        password = serializer.validated_data["password"]
-        user = authenticate(request, username=email, password=password)
-        if not user:
-            return Response(
-                {"detail": "Invalid email or password."},
-                status=status.HTTP_400_BAD_REQUEST,
+        with transaction.atomic():
+            user = User.objects.filter(username=guest_username).first()
+            if not user:
+                user = User(
+                    username=guest_username,
+                    email=guest_email,
+                    first_name=username,
+                    last_name="",
+                    is_active=True,
+                )
+                user.set_unusable_password()
+                user.save()
+            else:
+                changed_fields: list[str] = []
+                if user.email != guest_email:
+                    user.email = guest_email
+                    changed_fields.append("email")
+                if user.first_name != username:
+                    user.first_name = username
+                    changed_fields.append("first_name")
+                if not user.is_active:
+                    user.is_active = True
+                    changed_fields.append("is_active")
+                if changed_fields:
+                    user.save(update_fields=changed_fields)
+
+            status_row, _ = UserStatus.objects.get_or_create(user=user)
+            if status_row.is_deleted:
+                return Response(
+                    {"detail": "Account is archived. Contact admin."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+            if status_row.is_banned:
+                return Response(
+                    {"detail": "Your account is banned."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            profile, _ = PlayerProfile.objects.get_or_create(user=user)
+            profile.display_name = username
+            profile.avatar_color = avatar["color"]
+            profile.avatar_eyes = avatar["eyes"]
+            profile.avatar_mouth = avatar["mouth"]
+            profile.avatar_accessory = avatar["accessory"]
+            profile.save(
+                update_fields=[
+                    "display_name",
+                    "avatar_color",
+                    "avatar_eyes",
+                    "avatar_mouth",
+                    "avatar_accessory",
+                    "updated_at",
+                ]
             )
-        if not user.is_active:
-            return Response(
-                {"detail": "Account is disabled."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
 
-        status_row, _ = UserStatus.objects.get_or_create(user=user)
-        if status_row.is_deleted:
-            return Response(
-                {"detail": "Account is archived. Contact admin to restore."},
-                status=status.HTTP_403_FORBIDDEN,
+            session, _ = ActiveSession.objects.update_or_create(
+                user=user, defaults={"session_id": uuid.uuid4()}
             )
-        if status_row.is_banned:
-            return Response(
-                {"detail": "Your account is banned."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-        PlayerProfile.objects.get_or_create(user=user)
-        user.last_login = timezone.now()
-        user.save(update_fields=["last_login"])
-
-        session, _ = ActiveSession.objects.update_or_create(
-            user=user, defaults={"session_id": uuid.uuid4()}
-        )
+            user.last_login = timezone.now()
+            user.save(update_fields=["last_login"])
 
         refresh = RefreshToken.for_user(user)
         refresh["sid"] = str(session.session_id)
         access_token = str(refresh.access_token)
         refresh_token = str(refresh)
 
-        response = Response({"user": UserSerializer(user).data})
+        response = Response(
+            {
+                "device_id": device_id,
+                "character": character,
+                "user": UserSerializer(user).data,
+            },
+            status=status.HTTP_200_OK,
+        )
         _set_access_cookie(response, access_token)
         _set_refresh_cookie(response, refresh_token)
+        _set_guest_device_cookie(response, device_id)
         return response
 
 
@@ -185,230 +273,3 @@ class MeView(APIView):
     def get(self, request):
         PlayerProfile.objects.get_or_create(user=request.user)
         return Response(UserSerializer(request.user).data)
-
-
-class ProfileView(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        profile, _ = PlayerProfile.objects.get_or_create(user=request.user)
-        return Response(PlayerProfileSerializer(profile).data)
-
-    def put(self, request):
-        profile, _ = PlayerProfile.objects.get_or_create(user=request.user)
-        serializer = PlayerProfileSerializer(profile, data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
-
-
-class PasswordResetRequestView(APIView):
-    permission_classes = [AllowAny]
-    throttle_scope = "auth_password_reset"
-
-    def post(self, request):
-        serializer = PasswordResetRequestSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        email = serializer.validated_data["email"].lower()
-        user = User.objects.filter(email__iexact=email).first()
-
-        if user:
-            uid = urlsafe_base64_encode(force_bytes(user.pk))
-            token = default_token_generator.make_token(user)
-            reset_link = f"{settings.FRONTEND_URL}/reset-password/confirm?uid={uid}&token={token}"
-
-            subject = "Reset your password"
-            message = (
-                "We received a request to reset your password.\n\n"
-                f"Reset link: {reset_link}\n\n"
-                "If you did not request this, you can ignore this email."
-            )
-
-            try:
-                send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email])
-            except Exception as exc:
-                logger.warning("Password reset email failed for user_id=%s: %s", user.id, exc)
-
-        return Response(
-            {"detail": "If an account exists, a reset link has been sent."}
-        )
-
-
-class PasswordResetConfirmView(APIView):
-    permission_classes = [AllowAny]
-    throttle_scope = "auth_password_reset"
-
-    def post(self, request):
-        serializer = PasswordResetConfirmSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        uid = serializer.validated_data["uid"]
-        token = serializer.validated_data["token"]
-        new_password = serializer.validated_data["new_password"]
-
-        try:
-            user_id = force_str(urlsafe_base64_decode(uid))
-            user = User.objects.get(pk=user_id)
-        except (User.DoesNotExist, ValueError, TypeError, OverflowError):
-            return Response(
-                {"detail": "Invalid reset link."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        if not default_token_generator.check_token(user, token):
-            return Response(
-                {"detail": "Invalid or expired token."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        user.set_password(new_password)
-        user.save()
-        ActiveSession.objects.filter(user=user).delete()
-        UserStatus.objects.get_or_create(user=user)
-
-        return Response({"detail": "Password reset successful."})
-
-
-def _serialize_public_user(user):
-    profile, _ = PlayerProfile.objects.get_or_create(user=user)
-    name = (profile.display_name or "").strip()
-    if not name:
-        name = user.first_name or user.email.split("@")[0]
-    return {
-        "id": user.id,
-        "email": user.email,
-        "name": name,
-        "avatar": {
-            "color": profile.avatar_color,
-            "eyes": profile.avatar_eyes,
-            "mouth": profile.avatar_mouth,
-            "accessory": profile.avatar_accessory,
-        },
-    }
-
-
-class UserSearchView(APIView):
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "user_search"
-
-    def get(self, request):
-        query = (request.query_params.get("q") or "").strip()
-        if not query:
-            return Response({"results": []})
-
-        users = (
-            User.objects.filter(is_active=True)
-            .exclude(id=request.user.id)
-            .filter(Q(status__isnull=True) | Q(status__is_deleted=False))
-            .filter(Q(status__isnull=True) | Q(status__is_banned=False))
-            .filter(
-                Q(email__icontains=query)
-                | Q(first_name__icontains=query)
-                | Q(last_name__icontains=query)
-                | Q(player_profile__display_name__icontains=query)
-            )
-            .select_related("player_profile")
-            .order_by("-last_login", "-date_joined")[:20]
-        )
-
-        friend_ids = set(
-            Friendship.objects.filter(user=request.user, friend__in=users).values_list(
-                "friend_id", flat=True
-            )
-        )
-        results = []
-        for user in users:
-            payload = _serialize_public_user(user)
-            payload["is_friend"] = user.id in friend_ids
-            results.append(payload)
-        return Response({"results": results})
-
-
-class FriendsView(APIView):
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "friend_action"
-
-    def get(self, request):
-        links = (
-            Friendship.objects.filter(user=request.user)
-            .select_related("friend", "friend__player_profile")
-            .order_by("-created_at")
-        )
-        friends = []
-        for link in links:
-            friend_user = link.friend
-            if not friend_user.is_active:
-                continue
-            status_row = getattr(friend_user, "status", None)
-            if status_row and (status_row.is_banned or status_row.is_deleted):
-                continue
-            payload = _serialize_public_user(friend_user)
-            payload["friend_since"] = link.created_at
-            friends.append(payload)
-        return Response({"friends": friends})
-
-    def post(self, request):
-        target_id = request.data.get("user_id")
-        try:
-            target_id = int(target_id)
-        except (TypeError, ValueError):
-            return Response(
-                {"detail": "Valid user_id is required."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        if target_id == request.user.id:
-            return Response(
-                {"detail": "You cannot add yourself as friend."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        target = User.objects.filter(id=target_id).select_related("status").first()
-        if not target:
-            return Response({"detail": "User not found."}, status=status.HTTP_404_NOT_FOUND)
-        if not target.is_active:
-            return Response(
-                {"detail": "User account is not active."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        status_row = getattr(target, "status", None)
-        if status_row and (status_row.is_banned or status_row.is_deleted):
-            return Response(
-                {"detail": "User is not available."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        with transaction.atomic():
-            forward, _ = Friendship.objects.get_or_create(user=request.user, friend=target)
-            Friendship.objects.get_or_create(user=target, friend=request.user)
-
-        payload = _serialize_public_user(target)
-        payload["friend_since"] = forward.created_at
-        return Response({"detail": "Friend added.", "friend": payload})
-
-
-class FriendDetailView(APIView):
-    permission_classes = [IsAuthenticated]
-    throttle_scope = "friend_action"
-
-    def delete(self, request, user_id: int):
-        if user_id == request.user.id:
-            return Response(
-                {"detail": "You cannot unfriend yourself."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        deleted_count = 0
-        with transaction.atomic():
-            deleted_count += Friendship.objects.filter(
-                user=request.user, friend_id=user_id
-            ).delete()[0]
-            deleted_count += Friendship.objects.filter(
-                user_id=user_id, friend=request.user
-            ).delete()[0]
-
-        if deleted_count == 0:
-            return Response({"detail": "Friend not found."}, status=status.HTTP_404_NOT_FOUND)
-        return Response({"detail": "Unfriended successfully."})
-
-
-

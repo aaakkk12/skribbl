@@ -1,20 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import {
-  addFriend,
-  apiFetch,
-  getFriends,
-  listRoomInvites,
-  respondRoomInvite,
-  searchUsers,
-  unfriend,
-  type FriendUser,
-  type IncomingInvite,
-} from "../../lib/api";
-import PlayerAvatar from "../../components/PlayerAvatar";
+import { apiFetch } from "../../lib/api";
 
 type RoomSummary = {
   code: string;
@@ -25,7 +13,8 @@ type RoomSummary = {
 };
 
 type MeResponse = {
-  profile_completed: boolean;
+  display_name: string;
+  first_name: string;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
@@ -33,6 +22,8 @@ const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 export default function RoomsPage() {
   const router = useRouter();
+  const [name, setName] = useState("Player");
+  const [sessionReady, setSessionReady] = useState(false);
   const [code, setCode] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -41,34 +32,28 @@ export default function RoomsPage() {
   const [visibility, setVisibility] = useState<"open" | "private">("open");
   const [createPassword, setCreatePassword] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
-  const [incomingInvites, setIncomingInvites] = useState<IncomingInvite[]>([]);
-  const [inviteLoadingId, setInviteLoadingId] = useState<number | null>(null);
-  const [friendQuery, setFriendQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<FriendUser[]>([]);
-  const [friends, setFriends] = useState<FriendUser[]>([]);
-  const [friendLoadingId, setFriendLoadingId] = useState<number | null>(null);
+
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttempts = useRef(0);
   const lobbySocket = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    const ensureAuth = async () => {
+    const ensureSession = async () => {
       try {
         const me = await apiFetch<MeResponse>("/api/auth/me/", { method: "GET" });
-        if (!me.profile_completed) {
-          router.push("/profile/setup");
-          return;
-        }
-        const friendResponse = await getFriends();
-        setFriends(friendResponse.friends || []);
+        setName(me.display_name || me.first_name || "Player");
+        setSessionReady(true);
       } catch {
-        router.push("/login");
+        router.push("/");
       }
     };
-    ensureAuth();
+    ensureSession();
   }, [router]);
 
   useEffect(() => {
+    if (!sessionReady) {
+      return;
+    }
     const fetchRooms = async () => {
       try {
         const response = await apiFetch<{ rooms: RoomSummary[] }>("/api/rooms/list/", {
@@ -76,56 +61,16 @@ export default function RoomsPage() {
         });
         setRooms(response.rooms || []);
       } catch {
-        // ignore, websocket will update
+        // websocket will retry updates
       }
     };
     fetchRooms();
-  }, []);
+  }, [sessionReady]);
 
   useEffect(() => {
-    let active = true;
-    const runSearch = async () => {
-      const term = friendQuery.trim();
-      if (term.length < 2) {
-        setSearchResults([]);
-        return;
-      }
-      try {
-        const response = await searchUsers(term);
-        if (!active) return;
-        setSearchResults(response.results || []);
-      } catch {
-        if (!active) return;
-        setSearchResults([]);
-      }
-    };
-    const timer = setTimeout(runSearch, 250);
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [friendQuery]);
-
-  useEffect(() => {
-    let mounted = true;
-    const loadInvites = async () => {
-      try {
-        const response = await listRoomInvites();
-        if (!mounted) return;
-        setIncomingInvites(response.received || []);
-      } catch {
-        // ignore silently
-      }
-    };
-    loadInvites();
-    const interval = setInterval(loadInvites, 5000);
-    return () => {
-      mounted = false;
-      clearInterval(interval);
-    };
-  }, []);
-
-  useEffect(() => {
+    if (!sessionReady) {
+      return;
+    }
     let shouldReconnect = true;
 
     const connectLobby = () => {
@@ -174,12 +119,12 @@ export default function RoomsPage() {
         lobbySocket.current.close();
       }
     };
-  }, []);
+  }, [sessionReady]);
 
   const handleCreate = async () => {
     setError("");
     if (visibility === "private" && !createPassword.trim()) {
-      setError("Password is required for private rooms.");
+      setError("Private room ke liye password required hai.");
       return;
     }
     setLoading(true);
@@ -193,7 +138,7 @@ export default function RoomsPage() {
       });
       router.push(`/room/${response.code}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to create room");
+      setError(err instanceof Error ? err.message : "Unable to create room.");
     } finally {
       setLoading(false);
     }
@@ -210,20 +155,34 @@ export default function RoomsPage() {
       });
       router.push(`/room/${response.code}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to join room");
+      setError(err instanceof Error ? err.message : "Unable to join room.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleQuickJoin = async (roomCode: string) => {
+  const handleRandomJoin = async () => {
     setError("");
     setLoading(true);
     try {
-      const target = rooms.find((room) => room.code === roomCode);
+      const response = await apiFetch<{ code: string }>("/api/rooms/join-random/", {
+        method: "POST",
+      });
+      router.push(`/room/${response.code}`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "No random room available right now.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleQuickJoin = async (roomCode: string, isPrivate: boolean) => {
+    setError("");
+    setLoading(true);
+    try {
       let password = "";
-      if (target?.is_private) {
-        password = window.prompt(`Enter password for room ${roomCode}`) || "";
+      if (isPrivate) {
+        password = window.prompt(`Room ${roomCode} password enter karo`) || "";
         if (!password) {
           setLoading(false);
           return;
@@ -235,62 +194,9 @@ export default function RoomsPage() {
       });
       router.push(`/room/${response.code}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to join room");
+      setError(err instanceof Error ? err.message : "Unable to join room.");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleInviteAction = async (inviteId: number, action: "accept" | "reject") => {
-    setInviteLoadingId(inviteId);
-    setError("");
-    try {
-      const response = await respondRoomInvite(inviteId, action);
-      setIncomingInvites((prev) => prev.filter((invite) => invite.id !== inviteId));
-      if (action === "accept" && response.code) {
-        router.push(`/room/${response.code}`);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to handle invite.");
-    } finally {
-      setInviteLoadingId(null);
-    }
-  };
-
-  const refreshFriends = async () => {
-    const response = await getFriends();
-    setFriends(response.friends || []);
-  };
-
-  const handleAddFriend = async (userId: number) => {
-    setError("");
-    setFriendLoadingId(userId);
-    try {
-      await addFriend(userId);
-      await refreshFriends();
-      setSearchResults((prev) =>
-        prev.map((item) => (item.id === userId ? { ...item, is_friend: true } : item))
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to add friend.");
-    } finally {
-      setFriendLoadingId(null);
-    }
-  };
-
-  const handleUnfriend = async (userId: number) => {
-    setError("");
-    setFriendLoadingId(userId);
-    try {
-      await unfriend(userId);
-      await refreshFriends();
-      setSearchResults((prev) =>
-        prev.map((item) => (item.id === userId ? { ...item, is_friend: false } : item))
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to unfriend.");
-    } finally {
-      setFriendLoadingId(null);
     }
   };
 
@@ -299,24 +205,18 @@ export default function RoomsPage() {
       <section className="auth-card">
         <div className="nav-row">
           <div>
-            <span className="kicker">Live Drawing</span>
+            <span className="kicker">Welcome {name}</span>
             <h1 className="hero-title" style={{ fontSize: "2.3rem" }}>
-              Create or join a room
+              Room Lobby
             </h1>
           </div>
-          <Link className="link" href="/dashboard">
-            Back to dashboard
-          </Link>
         </div>
-        <p className="helper">
-          Rooms are limited to 8 players. Share the room code with friends to
-          start drawing together.
-        </p>
+
         <div className="room-actions-grid">
           <div className="room-card-lite">
             <div className="room-card-head">
               <h3>Create room</h3>
-              <span className="helper">Choose open or private</span>
+              <span className="helper">Open ya private choose karo</span>
             </div>
             <div className="room-card-body">
               <div className="room-visibility">
@@ -341,19 +241,16 @@ export default function RoomsPage() {
                   required
                 />
               ) : null}
-              <button
-                className="button button-primary"
-                onClick={handleCreate}
-                disabled={loading}
-              >
+              <button className="button button-primary" onClick={handleCreate} disabled={loading}>
                 {loading ? "Working..." : "Create room"}
               </button>
             </div>
           </div>
+
           <div className="room-card-lite">
             <div className="room-card-head">
               <h3>Join room</h3>
-              <span className="helper">Enter code and password if needed</span>
+              <span className="helper">Code paste karo aur join karo</span>
             </div>
             <form onSubmit={handleJoin} className="room-join">
               <input
@@ -361,6 +258,7 @@ export default function RoomsPage() {
                 onChange={(event) => setCode(event.target.value.toUpperCase())}
                 placeholder="Enter room code"
                 maxLength={8}
+                required
               />
               <input
                 type="password"
@@ -374,122 +272,23 @@ export default function RoomsPage() {
             </form>
           </div>
         </div>
-        <div className="social-grid">
-          <div className="social-card">
-            <h3>Search players</h3>
-            <input
-              className="social-input"
-              value={friendQuery}
-              onChange={(event) => setFriendQuery(event.target.value)}
-              placeholder="Search by name or email"
-            />
-            <div className="social-list">
-              {searchResults.length === 0 ? (
-                <p className="helper">Type at least 2 characters to search.</p>
-              ) : (
-                searchResults.map((user) => (
-                  <div key={user.id} className="social-row">
-                    <div className="social-user">
-                      <PlayerAvatar avatar={user.avatar} size={30} />
-                      <div>
-                        <strong>{user.name}</strong>
-                        <p className="helper">{user.email}</p>
-                      </div>
-                    </div>
-                    {user.is_friend ? (
-                      <button
-                        className="button button-ghost"
-                        type="button"
-                        disabled={friendLoadingId === user.id}
-                        onClick={() => handleUnfriend(user.id)}
-                      >
-                        Unfriend
-                      </button>
-                    ) : (
-                      <button
-                        className="button button-primary"
-                        type="button"
-                        disabled={friendLoadingId === user.id}
-                        onClick={() => handleAddFriend(user.id)}
-                      >
-                        Add friend
-                      </button>
-                    )}
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-          <div className="social-card">
-            <h3>My friends</h3>
-            <div className="social-list">
-              {friends.length === 0 ? (
-                <p className="helper">No friends yet.</p>
-              ) : (
-                friends.map((friend) => (
-                  <div key={friend.id} className="social-row">
-                    <div className="social-user">
-                      <PlayerAvatar avatar={friend.avatar} size={30} />
-                      <div>
-                        <strong>{friend.name}</strong>
-                        <p className="helper">{friend.email}</p>
-                      </div>
-                    </div>
-                    <button
-                      className="button button-ghost"
-                      type="button"
-                      disabled={friendLoadingId === friend.id}
-                      onClick={() => handleUnfriend(friend.id)}
-                    >
-                      Unfriend
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
+
+        <div className="random-room-row">
+          <button className="button button-primary" type="button" onClick={handleRandomJoin} disabled={loading}>
+            Join Random Room
+          </button>
+          <span className="helper">Sirf joinable public rooms me random pick hota hai.</span>
         </div>
+
         {error ? <p className="error">{error}</p> : null}
-        {incomingInvites.length > 0 ? (
-          <div className="invite-banner-list">
-            {incomingInvites.map((invite) => (
-              <div key={invite.id} className="invite-banner">
-                <div className="invite-banner-user">
-                  <PlayerAvatar avatar={invite.from_user.avatar} size={30} />
-                  <span>
-                    <strong>{invite.from_user.name}</strong> invited you to room{" "}
-                    <strong>{invite.room_code}</strong>
-                  </span>
-                </div>
-                <div className="invite-banner-actions">
-                  <button
-                    className="button button-ghost"
-                    type="button"
-                    disabled={inviteLoadingId === invite.id}
-                    onClick={() => handleInviteAction(invite.id, "reject")}
-                  >
-                    Reject
-                  </button>
-                  <button
-                    className="button button-primary"
-                    type="button"
-                    disabled={inviteLoadingId === invite.id}
-                    onClick={() => handleInviteAction(invite.id, "accept")}
-                  >
-                    Join
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
+
         <div className="room-list-header">
           <span className={`status-dot status-${lobbyStatus}`} />
           <span className="helper">Live rooms</span>
         </div>
         <div className="room-list">
           {rooms.length === 0 ? (
-            <p className="helper">No active rooms right now.</p>
+            <p className="helper">No Rooms active.</p>
           ) : (
             rooms.map((room) => (
               <div key={room.code} className="room-card">
@@ -507,7 +306,7 @@ export default function RoomsPage() {
                   {room.is_full ? <span className="badge badge-warn">Full</span> : null}
                   <button
                     className="button button-ghost"
-                    onClick={() => handleQuickJoin(room.code)}
+                    onClick={() => handleQuickJoin(room.code, room.is_private)}
                     disabled={loading || room.is_full}
                   >
                     Join

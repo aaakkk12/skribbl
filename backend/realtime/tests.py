@@ -1,16 +1,17 @@
+from datetime import timedelta
+
 from asgiref.sync import async_to_sync
 from channels.testing import WebsocketCommunicator
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
-from datetime import timedelta
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from authapp.models import ActiveSession, Friendship, PlayerProfile, UserStatus
+from authapp.models import ActiveSession, PlayerProfile, UserStatus
 from realtime.lifecycle import cleanup_inactive_rooms
-from realtime.models import Room, RoomInvite, RoomMember
+from realtime.models import Room, RoomMember
 
 User = get_user_model()
 
@@ -116,16 +117,18 @@ class RoomLifecycleTests(TestCase):
         self.assertTrue(Room.objects.filter(id=room.id).exists())
 
 
-@override_settings(ALLOWED_HOSTS=["testserver", "localhost", "127.0.0.1"])
-class RoomInviteFlowTests(TestCase):
+@override_settings(
+    ALLOWED_HOSTS=["testserver", "localhost", "127.0.0.1"],
+    CHANNEL_LAYERS={"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}},
+)
+class RoomRandomJoinTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.sender = self._create_user("sender@example.com", "Sender")
-        self.receiver = self._create_user("receiver@example.com", "Receiver")
-        Friendship.objects.get_or_create(user=self.sender, friend=self.receiver)
-        Friendship.objects.get_or_create(user=self.receiver, friend=self.sender)
+        self.player = self._create_user("player@example.com", "Player")
+        self.owner_a = self._create_user("owner-a@example.com", "OwnerA")
+        self.owner_b = self._create_user("owner-b@example.com", "OwnerB")
 
-    def _create_user(self, email: str, display_name: str):
+    def _create_user(self, email: str, name: str):
         user = User.objects.create_user(
             username=email,
             email=email,
@@ -133,47 +136,32 @@ class RoomInviteFlowTests(TestCase):
         )
         UserStatus.objects.get_or_create(user=user)
         profile, _ = PlayerProfile.objects.get_or_create(user=user)
-        profile.display_name = display_name
+        profile.display_name = name
         profile.save(update_fields=["display_name"])
         return user
 
-    def test_accept_invite_switches_room(self):
-        room_a = Room.objects.create(code="ROOMA1", owner=self.sender, is_active=True)
-        room_b = Room.objects.create(code="ROOMB1", owner=self.receiver, is_active=True)
-        RoomMember.objects.create(room=room_a, user=self.sender, is_active=True)
-        RoomMember.objects.create(room=room_b, user=self.receiver, is_active=True)
+    def test_join_random_joins_public_room(self):
+        public_room = Room.objects.create(code="PUB001", owner=self.owner_a, is_active=True)
+        private_room = Room.objects.create(code="PRV001", owner=self.owner_b, is_active=True, is_private=True)
+        private_room.set_password("secret123")
+        private_room.save(update_fields=["password_hash"])
 
-        self.client.force_authenticate(user=self.sender)
-        send_response = self.client.post(
-            f"/api/rooms/{room_a.code}/invite/",
-            {"user_id": self.receiver.id},
-            format="json",
-        )
-        self.assertEqual(send_response.status_code, 201)
-
-        self.client.force_authenticate(user=self.receiver)
-        invites_response = self.client.get("/api/rooms/invites/")
-        self.assertEqual(invites_response.status_code, 200)
-        received = invites_response.json().get("received", [])
-        self.assertEqual(len(received), 1)
-        invite_id = received[0]["id"]
-
-        accept_response = self.client.post(
-            f"/api/rooms/invites/{invite_id}/respond/",
-            {"action": "accept"},
-            format="json",
-        )
-        self.assertEqual(accept_response.status_code, 200)
-        self.assertEqual(accept_response.json().get("code"), room_a.code)
-
+        self.client.force_authenticate(user=self.player)
+        response = self.client.post("/api/rooms/join-random/", {}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json().get("code"), public_room.code)
         self.assertTrue(
-            RoomMember.objects.filter(room=room_a, user=self.receiver, is_active=True).exists()
+            RoomMember.objects.filter(room=public_room, user=self.player, is_active=True).exists()
         )
         self.assertFalse(
-            RoomMember.objects.filter(room=room_b, user=self.receiver, is_active=True).exists()
+            RoomMember.objects.filter(room=private_room, user=self.player, is_active=True).exists()
         )
-        self.assertTrue(
-            RoomInvite.objects.filter(
-                id=invite_id, status=RoomInvite.STATUS_ACCEPTED
-            ).exists()
-        )
+
+    def test_join_random_returns_404_when_no_public_room(self):
+        private_room = Room.objects.create(code="PRV002", owner=self.owner_b, is_active=True, is_private=True)
+        private_room.set_password("secret123")
+        private_room.save(update_fields=["password_hash"])
+
+        self.client.force_authenticate(user=self.player)
+        response = self.client.post("/api/rooms/join-random/", {}, format="json")
+        self.assertEqual(response.status_code, 404)

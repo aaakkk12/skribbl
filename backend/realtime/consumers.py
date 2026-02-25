@@ -20,7 +20,7 @@ from .lobby import rooms_snapshot
 from .lifecycle import cleanup_inactive_rooms, sync_room_empty_state
 
 MAX_PLAYERS = 8
-CHAT_HISTORY_LIMIT = 500
+CHAT_HISTORY_LIMIT = 200
 DRAW_HISTORY_LIMIT = 2000
 CHAT_WINDOW_SECONDS = 4
 CHAT_MAX_BURST = 3
@@ -537,7 +537,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
             await self.save_state_to_redis(state)
         await self.set_member_inactive(self.room, user_id)
         await self.sync_room_empty_state_db()
-        await self.cleanup_inactive_rooms_db()
+        await self.cleanup_inactive_rooms_db(empty_minutes=0)
         await self.cleanup_kick_votes(state, user_id)
         await self.broadcast_presence()
         await self.maybe_pause_game(state)
@@ -806,7 +806,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.set_member_inactive(self.room, user_id)
         await self.sync_room_empty_state_db()
-        await self.cleanup_inactive_rooms_db()
+        await self.cleanup_inactive_rooms_db(empty_minutes=0)
         await self.broadcast_presence()
         await self.maybe_pause_game(state)
 
@@ -928,7 +928,7 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         )
         await self.set_member_inactive(self.room, target_id)
         await self.sync_room_empty_state_db()
-        await self.cleanup_inactive_rooms_db()
+        await self.cleanup_inactive_rooms_db(empty_minutes=0)
         await self.broadcast_presence()
 
     async def send_game_state(self, state: GameState):
@@ -1396,8 +1396,8 @@ class RoomConsumer(AsyncJsonWebsocketConsumer):
         return sync_room_empty_state(self.room.id)
 
     @database_sync_to_async
-    def cleanup_inactive_rooms_db(self):
-        return cleanup_inactive_rooms()
+    def cleanup_inactive_rooms_db(self, empty_minutes: int | None = None):
+        return cleanup_inactive_rooms(empty_minutes=empty_minutes)
 
     @database_sync_to_async
     def is_user_allowed(self, user_id: int) -> bool:

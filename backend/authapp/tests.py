@@ -1,13 +1,14 @@
 from datetime import timedelta
 from io import StringIO
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from authapp.models import ActiveSession, Friendship, PlayerProfile, UserStatus
+from authapp.models import ActiveSession, PlayerProfile, UserStatus
 
 User = get_user_model()
 
@@ -17,69 +18,113 @@ class AuthFlowTests(TestCase):
     def setUp(self):
         self.client = APIClient()
 
-    def test_register_login_logout_flow(self):
-        payload = {
-            "email": "auth-flow@example.com",
-            "password": "StrongPass123!",
-            "first_name": "Auth",
-        }
-        response = self.client.post("/api/auth/register/", payload, format="json")
-        self.assertEqual(response.status_code, 201)
-
+    def test_guest_session_bootstraps_profile_and_cookies(self):
         response = self.client.post(
-            "/api/auth/login/",
-            {"email": payload["email"], "password": payload["password"]},
+            "/api/auth/guest-session/",
+            {
+                "username": "SketchMaster",
+                "character": "royal",
+                "device_id": "5f9c13d0-560a-4bc7-8f95-10c2f6d2a384",
+            },
             format="json",
         )
         self.assertEqual(response.status_code, 200)
         self.assertIn("access_token", response.cookies)
         self.assertIn("refresh_token", response.cookies)
 
-        response = self.client.get("/api/auth/me/")
-        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        device_id = body.get("device_id")
+        self.assertEqual(device_id, "5f9c13d0-560a-4bc7-8f95-10c2f6d2a384")
 
-        response = self.client.post("/api/auth/logout/", {}, format="json")
-        self.assertEqual(response.status_code, 200)
+        guest_username = f"guest_{device_id.replace('-', '')}"
+        user = User.objects.filter(username=guest_username).first()
+        self.assertIsNotNone(user)
 
-        response = self.client.get("/api/auth/me/")
-        self.assertEqual(response.status_code, 401)
+        profile = PlayerProfile.objects.filter(user=user).first()
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.display_name, "SketchMaster")
+        self.assertEqual(profile.avatar_accessory, "crown")
 
-    def test_banned_user_cannot_login(self):
+        me_response = self.client.get("/api/auth/me/")
+        self.assertEqual(me_response.status_code, 200)
+        self.assertEqual(me_response.json().get("display_name"), "SketchMaster")
+        self.assertIn(settings.GUEST_DEVICE_COOKIE, response.cookies)
+
+    def test_guest_session_reuses_cookie_device_id_when_not_provided(self):
+        initial_device_id = "f1b26156-1111-4ca1-8db4-98b5ef52f82f"
+        first = self.client.post(
+            "/api/auth/guest-session/",
+            {
+                "username": "PlayerOne",
+                "character": "sprinter",
+                "device_id": initial_device_id,
+            },
+            format="json",
+        )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json().get("device_id"), initial_device_id)
+
+        second = self.client.post(
+            "/api/auth/guest-session/",
+            {
+                "username": "PlayerOne",
+                "character": "captain",
+            },
+            format="json",
+        )
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json().get("device_id"), initial_device_id)
+        guest_username = f"guest_{initial_device_id.replace('-', '')}"
+        self.assertEqual(User.objects.filter(username=guest_username).count(), 1)
+
+    def test_guest_session_denies_banned_account(self):
+        device_id = "8d6e6534-527a-4fac-9f68-22f6db59ab18"
+        guest_username = f"guest_{device_id.replace('-', '')}"
+        guest_email = f"{guest_username}@guest.local"
+
         user = User.objects.create_user(
-            username="banned@example.com",
-            email="banned@example.com",
+            username=guest_username,
+            email=guest_email,
             password="StrongPass123!",
+            first_name="Blocked",
         )
         status_row, _ = UserStatus.objects.get_or_create(user=user)
         status_row.is_banned = True
         status_row.save(update_fields=["is_banned"])
 
         response = self.client.post(
-            "/api/auth/login/",
-            {"email": user.email, "password": "StrongPass123!"},
+            "/api/auth/guest-session/",
+            {
+                "username": "Blocked",
+                "character": "sprinter",
+                "device_id": device_id,
+            },
             format="json",
         )
         self.assertEqual(response.status_code, 403)
         self.assertEqual(response.json().get("detail"), "Your account is banned.")
 
-    def test_archived_user_cannot_register_again(self):
-        user = User.objects.create_user(
-            username="archived@example.com",
-            email="archived@example.com",
-            password="StrongPass123!",
-        )
-        status_row, _ = UserStatus.objects.get_or_create(user=user)
-        status_row.is_deleted = True
-        status_row.save(update_fields=["is_deleted"])
-
-        response = self.client.post(
-            "/api/auth/register/",
-            {"email": user.email, "password": "AnotherPass123!"},
+    def test_refresh_and_logout_flow(self):
+        session_response = self.client.post(
+            "/api/auth/guest-session/",
+            {
+                "username": "RefreshUser",
+                "character": "captain",
+                "device_id": "1f9e9db5-c871-4a18-a1e2-a6b57791a736",
+            },
             format="json",
         )
-        self.assertEqual(response.status_code, 400)
-        message = str(response.json())
-        self.assertIn("archived", message.lower())
+        self.assertEqual(session_response.status_code, 200)
+
+        refresh_response = self.client.post("/api/auth/token/refresh/", {}, format="json")
+        self.assertEqual(refresh_response.status_code, 200)
+        self.assertIn("access_token", refresh_response.cookies)
+
+        logout_response = self.client.post("/api/auth/logout/", {}, format="json")
+        self.assertEqual(logout_response.status_code, 200)
+
+        me_response = self.client.get("/api/auth/me/")
+        self.assertEqual(me_response.status_code, 401)
 
     def test_admin_api_disabled_by_default(self):
         response = self.client.post(
@@ -156,52 +201,3 @@ class MaintenanceCommandTests(TestCase):
         )
 
         self.assertTrue(User.objects.filter(id=inactive_user.id).exists())
-
-
-@override_settings(ALLOWED_HOSTS=["testserver", "localhost", "127.0.0.1"])
-class FriendApiTests(TestCase):
-    def setUp(self):
-        self.client = APIClient()
-        self.me = self._create_user("me@example.com", "MePlayer")
-        self.friend = self._create_user("buddy@example.com", "Buddy")
-        self.client.force_authenticate(user=self.me)
-
-    def _create_user(self, email: str, display_name: str):
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password="StrongPass123!",
-        )
-        UserStatus.objects.get_or_create(user=user)
-        profile, _ = PlayerProfile.objects.get_or_create(user=user)
-        profile.display_name = display_name
-        profile.save(update_fields=["display_name"])
-        return user
-
-    def test_search_add_and_unfriend(self):
-        search_response = self.client.get("/api/auth/users/search/?q=buddy")
-        self.assertEqual(search_response.status_code, 200)
-        self.assertEqual(len(search_response.json().get("results", [])), 1)
-
-        add_response = self.client.post(
-            "/api/auth/friends/",
-            {"user_id": self.friend.id},
-            format="json",
-        )
-        self.assertEqual(add_response.status_code, 200)
-        self.assertTrue(
-            Friendship.objects.filter(user=self.me, friend=self.friend).exists()
-        )
-        self.assertTrue(
-            Friendship.objects.filter(user=self.friend, friend=self.me).exists()
-        )
-
-        list_response = self.client.get("/api/auth/friends/")
-        self.assertEqual(list_response.status_code, 200)
-        self.assertEqual(len(list_response.json().get("friends", [])), 1)
-
-        remove_response = self.client.delete(f"/api/auth/friends/{self.friend.id}/")
-        self.assertEqual(remove_response.status_code, 200)
-        self.assertFalse(
-            Friendship.objects.filter(user=self.me, friend=self.friend).exists()
-        )

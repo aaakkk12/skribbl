@@ -2,15 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import {
-  apiFetch,
-  getFriends,
-  listRoomInvites,
-  respondRoomInvite,
-  sendRoomInvite,
-  type FriendUser,
-  type IncomingInvite,
-} from "../../../lib/api";
+import { apiFetch } from "../../../lib/api";
 import PlayerAvatar, { type AvatarConfig } from "../../../components/PlayerAvatar";
 
 type Member = {
@@ -93,11 +85,6 @@ export default function RoomClient({ code }: { code: string }) {
   const [roundBreak, setRoundBreak] = useState<RoundBreak | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [kickModal, setKickModal] = useState<KickModal | null>(null);
-  const [friends, setFriends] = useState<FriendUser[]>([]);
-  const [inviteModalOpen, setInviteModalOpen] = useState(false);
-  const [inviteSendingId, setInviteSendingId] = useState<number | null>(null);
-  const [incomingInvites, setIncomingInvites] = useState<IncomingInvite[]>([]);
-  const [inviteRespondingId, setInviteRespondingId] = useState<number | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
@@ -111,7 +98,7 @@ export default function RoomClient({ code }: { code: string }) {
   const meRef = useRef<Member | null>(null);
   const pendingChatIds = useRef<Set<string>>(new Set());
   const chatListRef = useRef<HTMLDivElement | null>(null);
-  const invitesPollTimer = useRef<NodeJS.Timeout | null>(null);
+  const hasLeftRoomRef = useRef(false);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const canvasWrapRef = useRef<HTMLDivElement | null>(null);
@@ -178,23 +165,33 @@ export default function RoomClient({ code }: { code: string }) {
     }, 1000);
   };
 
-  const fetchFriends = useCallback(async () => {
-    try {
-      const response = await getFriends();
-      setFriends(response.friends || []);
-    } catch {
-      setFriends([]);
+  const sendBackgroundLeave = useCallback(() => {
+    if (hasLeftRoomRef.current) {
+      return;
     }
-  }, []);
-
-  const fetchIncomingInvites = useCallback(async () => {
+    hasLeftRoomRef.current = true;
     try {
-      const response = await listRoomInvites();
-      setIncomingInvites(response.received || []);
+      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: "leave" }));
+      }
     } catch {
-      // silent poll
+      // ignore socket send failures during unload
     }
-  }, []);
+    try {
+      void fetch(`${API_BASE}/api/rooms/leave/`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ code }),
+        keepalive: true,
+      });
+    } catch {
+      // ignore unload fetch failures
+    }
+  }, [code]);
 
   useEffect(() => {
     const ensureAuth = async () => {
@@ -202,11 +199,7 @@ export default function RoomClient({ code }: { code: string }) {
       try {
         meData = await apiFetch<MeResponse>("/api/auth/me/", { method: "GET" });
       } catch {
-        router.push("/login");
-        return;
-      }
-      if (!meData.profile_completed) {
-        router.push("/profile/setup");
+        router.push("/");
         return;
       }
       setMe({
@@ -214,8 +207,6 @@ export default function RoomClient({ code }: { code: string }) {
         name: meData.display_name || meData.first_name || meData.email.split("@")[0],
         avatar: meData.avatar,
       });
-      await fetchFriends();
-      await fetchIncomingInvites();
       try {
         await apiFetch("/api/rooms/join/", {
           method: "POST",
@@ -226,7 +217,7 @@ export default function RoomClient({ code }: { code: string }) {
       }
     };
     ensureAuth();
-  }, [code, fetchFriends, fetchIncomingInvites, router]);
+  }, [code, router, sendBackgroundLeave]);
 
   useEffect(() => {
     membersRef.current = members;
@@ -235,23 +226,6 @@ export default function RoomClient({ code }: { code: string }) {
   useEffect(() => {
     meRef.current = me;
   }, [me]);
-
-  useEffect(() => {
-    if (!me) return;
-    fetchIncomingInvites();
-    if (invitesPollTimer.current) {
-      clearInterval(invitesPollTimer.current);
-    }
-    invitesPollTimer.current = setInterval(() => {
-      fetchIncomingInvites();
-    }, 5000);
-    return () => {
-      if (invitesPollTimer.current) {
-        clearInterval(invitesPollTimer.current);
-        invitesPollTimer.current = null;
-      }
-    };
-  }, [fetchIncomingInvites, me]);
 
   useEffect(() => {
     if (!chatListRef.current) return;
@@ -315,7 +289,7 @@ export default function RoomClient({ code }: { code: string }) {
         if (fatalCodes.includes(event.code)) {
           shouldReconnect.current = false;
           if (event.code === 4401) {
-            router.push("/login");
+            router.push("/");
           } else if (event.code === 4403 || event.code === 4404) {
             showToast("Room access denied.");
             setTimeout(() => router.push("/rooms"), 500);
@@ -366,7 +340,7 @@ export default function RoomClient({ code }: { code: string }) {
           ]);
         } else if (data.type === "guess_correct") {
           setScores(data.scores || {});
-          showToast("🎉 Correct guess!");
+          showToast("Correct guess!");
         } else if (data.type === "clear") {
           clearCanvas();
         } else if (data.type === "round_start") {
@@ -401,7 +375,7 @@ export default function RoomClient({ code }: { code: string }) {
             ...prev,
             {
               id: `${Date.now()}-${Math.random()}`,
-              message: `✨ Word was: ${data.word}`,
+              message: `Word was: ${data.word}`,
               system: true,
             },
           ]);
@@ -573,14 +547,14 @@ export default function RoomClient({ code }: { code: string }) {
     connectSocket();
 
     const handlePageLeave = () => {
-      sendSocket({ type: "leave" });
+      sendBackgroundLeave();
     };
     window.addEventListener("beforeunload", handlePageLeave);
     window.addEventListener("pagehide", handlePageLeave);
 
     return () => {
       shouldReconnect.current = false;
-      handlePageLeave();
+      sendBackgroundLeave();
       window.removeEventListener("beforeunload", handlePageLeave);
       window.removeEventListener("pagehide", handlePageLeave);
       if (reconnectTimer.current) {
@@ -602,7 +576,7 @@ export default function RoomClient({ code }: { code: string }) {
         socketRef.current.close();
       }
     };
-  }, [code, router]);
+  }, [code, router, sendBackgroundLeave]);
 
   const sendSocket = (payload: Record<string, unknown>) => {
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
@@ -705,41 +679,8 @@ export default function RoomClient({ code }: { code: string }) {
     setKickModal(null);
   };
 
-  const handleSendInvite = async (friendId: number) => {
-    setInviteSendingId(friendId);
-    try {
-      const response = await sendRoomInvite(code, friendId);
-      showToast(response.detail || "Invite sent.");
-      await fetchIncomingInvites();
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Unable to send invite.");
-    } finally {
-      setInviteSendingId(null);
-    }
-  };
-
-  const handleInviteAction = async (inviteId: number, action: "accept" | "reject") => {
-    setInviteRespondingId(inviteId);
-    try {
-      const response = await respondRoomInvite(inviteId, action);
-      setIncomingInvites((prev) => prev.filter((invite) => invite.id !== inviteId));
-      if (action === "accept" && response.code) {
-        shouldReconnect.current = false;
-        if (socketRef.current) {
-          socketRef.current.close();
-        }
-        router.push(`/room/${response.code}`);
-        return;
-      }
-      showToast(response.detail || (action === "accept" ? "Joined room." : "Invite rejected."));
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : "Unable to handle invite.");
-    } finally {
-      setInviteRespondingId(null);
-    }
-  };
-
   const handleLeaveRoom = async () => {
+    hasLeftRoomRef.current = true;
     shouldReconnect.current = false;
     sendSocket({ type: "leave" });
     try {
@@ -800,54 +741,11 @@ export default function RoomClient({ code }: { code: string }) {
             </h1>
           </div>
           <div className="room-actions">
-            <button
-              className="button button-ghost"
-              type="button"
-              onClick={() => {
-                fetchFriends();
-                setInviteModalOpen(true);
-              }}
-            >
-              Send invite
-            </button>
             <button className="link link-button" type="button" onClick={handleLeaveRoom}>
               Leave room
             </button>
           </div>
         </div>
-        {incomingInvites.length > 0 ? (
-          <div className="invite-banner-list">
-            {incomingInvites.map((invite) => (
-              <div key={invite.id} className="invite-banner">
-                <div className="invite-banner-user">
-                  <PlayerAvatar avatar={invite.from_user.avatar} size={30} />
-                  <span>
-                    <strong>{invite.from_user.name}</strong> invited you to room{" "}
-                    <strong>{invite.room_code}</strong>
-                  </span>
-                </div>
-                <div className="invite-banner-actions">
-                  <button
-                    className="button button-ghost"
-                    type="button"
-                    disabled={inviteRespondingId === invite.id}
-                    onClick={() => handleInviteAction(invite.id, "reject")}
-                  >
-                    Reject
-                  </button>
-                  <button
-                    className="button button-primary"
-                    type="button"
-                    disabled={inviteRespondingId === invite.id}
-                    onClick={() => handleInviteAction(invite.id, "accept")}
-                  >
-                    Join
-                  </button>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : null}
         <div className="room-status">
           <span className={`status-dot status-${status}`} />
           <span className="helper">{status}</span>
@@ -1001,44 +899,6 @@ export default function RoomClient({ code }: { code: string }) {
             ))}
           </div>
         </div>
-        {inviteModalOpen ? (
-          <div className="modal-backdrop">
-            <div className="modal-card modal-card-wide">
-              <h3>Invite friends</h3>
-              <p className="helper">Send room request to your friend list.</p>
-              <div className="modal-scroll-list">
-                {friends.length === 0 ? (
-                  <p className="helper">No friends found. Add friends from dashboard.</p>
-                ) : (
-                  friends.map((friend) => (
-                    <div key={friend.id} className="social-row">
-                      <div className="social-user">
-                        <PlayerAvatar avatar={friend.avatar} size={30} />
-                        <div>
-                          <strong>{friend.name}</strong>
-                          <p className="helper">{friend.email}</p>
-                        </div>
-                      </div>
-                      <button
-                        className="button button-primary"
-                        type="button"
-                        disabled={inviteSendingId === friend.id}
-                        onClick={() => handleSendInvite(friend.id)}
-                      >
-                        Invite
-                      </button>
-                    </div>
-                  ))
-                )}
-              </div>
-              <div className="modal-actions">
-                <button className="button button-ghost" onClick={() => setInviteModalOpen(false)}>
-                  Close
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : null}
         {kickModal ? (
           <div className="modal-backdrop">
             <div className="modal-card">
