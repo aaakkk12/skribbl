@@ -74,7 +74,6 @@ export default function Home() {
   );
 
   useEffect(() => {
-    router.prefetch("/rooms");
     if (typeof window === "undefined") return;
     try {
       const raw = window.localStorage.getItem(STORAGE_KEY);
@@ -92,7 +91,7 @@ export default function Home() {
     } catch {
       // ignore local storage parsing errors
     }
-  }, [router]);
+  }, []);
 
   const handleContinue = async (event: React.FormEvent) => {
     event.preventDefault();
